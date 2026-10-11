@@ -1,0 +1,46 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "Open Game Settings": {
+      "localizations": {
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abrir ajustes del juego"
+          }
+        }
+      }
+    },
+    "Close Game Settings": {
+      "localizations": {
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cerrar ajustes del juego"
+          }
+        }
+      }
+    },
+    "Opens the quick settings panel inside the running game.": {
+      "localizations": {
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abre el panel de ajustes rápidos dentro del juego en marcha."
+          }
+        }
+      }
+    },
+    "Closes the quick settings panel inside the running game.": {
+      "localizations": {
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cierra el panel de ajustes rápidos dentro del juego en marcha."
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

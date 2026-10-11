@@ -1,0 +1,43 @@
+# Your own machine: config, Meta's tool, APKs, game data, recorded pipelines. Never committed.
+local/*
+!local/config.env.example
+
+# Game data and store downloads (wherever they land)
+*.apk
+*.obb
+*.foz
+*.vpk
+game/
+**/games/
+klepton/beatsaber*/
+klepton/superhot/
+klepton/metro*
+klepton/ieytd*/
+
+# Build output
+build/
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.dSYM/
+*.o
+*.dylib
+*.log
+klepton/visionos/build/
+klepton/visionos/Frameworks/
+klepton/visionos/*.xcodeproj/
+__pycache__/
+
+# Third-party checkouts fetched by the build (ANGLE, MoltenVK, Fossilize)
+klepton/vendor
+klepton/vendor/
+klepton/vendor-moltenvk*
+klepton/vendor-fossilize
+klepton/vendor-fossilize/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

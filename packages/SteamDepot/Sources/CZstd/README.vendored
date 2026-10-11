@@ -1,0 +1,2 @@
+Vendored from https://github.com/facebook/zstd tag v1.5.7 (decompression sources only).
+License: BSD (see LICENSE). Built with ZSTD_DISABLE_ASM, no legacy formats.

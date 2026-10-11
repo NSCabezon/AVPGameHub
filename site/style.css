@@ -1,0 +1,51 @@
+:root {
+  --bg: #fbfbfd;
+  --fg: #1d1d1f;
+  --muted: #6e6e73;
+  --card: #ffffff;
+  --line: #e5e5ea;
+  --accent: #0a84ff;
+  --accent-fg: #ffffff;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0b0d;
+    --fg: #f5f5f7;
+    --muted: #98989d;
+    --card: #1c1c1f;
+    --line: #2c2c2e;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+}
+main { max-width: 760px; margin: 0 auto; padding: 72px 16px 48px; }
+a { color: var(--accent); }
+.hero { text-align: center; margin-bottom: 48px; }
+h1 { font-size: clamp(40px, 8vw, 64px); letter-spacing: -0.02em; margin: 0 0 12px; }
+.lead { font-size: 21px; color: var(--muted); margin: 0 0 28px; }
+.actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.button {
+  display: inline-block; padding: 10px 20px; border-radius: 999px;
+  border: 1px solid var(--line); text-decoration: none; color: var(--fg); font-weight: 600;
+}
+.button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.games { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.games article { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px; }
+.games h3 { margin: 0 0 10px; font-size: 18px; }
+.pill {
+  display: inline-block; font-size: 13px; font-weight: 600; padding: 2px 10px;
+  border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+}
+.stat { text-align: center; color: var(--muted); margin: 28px 0; }
+.stat strong { color: var(--fg); }
+.points { list-style: none; padding: 0; margin: 0 0 48px; display: grid; gap: 10px; }
+.points li { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+footer { border-top: 1px solid var(--line); padding-top: 20px; color: var(--muted); font-size: 14px; text-align: center; }
+.tip { margin: 16px 0 0; }
+.tip img { vertical-align: middle; border-radius: 999px; }
