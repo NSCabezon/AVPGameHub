@@ -71,6 +71,21 @@ struct KLToast {
     var accent: SIMD3<Double>? = nil // edge + header colour; nil: the achievement gold
 }
 
+/// A persistent status card, drawn in the toast's place for as long as it is
+/// set (and over the toast queue, which resumes when it clears). The Mac
+/// stream's "Conectando a <Mac>…" / "Sin señal del Mac" (KleptonStreamClient.swift).
+/// Set from any thread; read once a frame on the render thread.
+struct KLHUDStatus: Equatable {
+    let header: String
+    let name: String
+    let desc: String
+
+    nonisolated(unsafe) private static var value: KLHUDStatus?
+    private static let lock = NSLock()
+    static func set(_ s: KLHUDStatus?) { lock.lock(); value = s; lock.unlock() }
+    static func current() -> KLHUDStatus? { lock.lock(); defer { lock.unlock() }; return value }
+}
+
 /// The unlocks waiting to be shown. Filled from kl_steam.c's store worker
 /// thread through the C handler, drained on the render thread.
 final class KleptonToasts: @unchecked Sendable {
@@ -370,6 +385,7 @@ final class KleptonHUD {
     private let toastSecs = Double(klEnvFloat("KL_TOAST_SECS", 5))
     private let started = CACurrentMediaTime()
     private var testFired = !klEnvOn("KL_TOAST_TEST", default: false)
+    private var statusShown: KLHUDStatus?
 
     // The controller card (updateControllerPresence / prepareControllerCard).
     /// A Sense controller was connected at some point in this process — the
@@ -694,19 +710,39 @@ final class KleptonHUD {
                 icon: ""))
             NSLog("[toast] KL_TOAST_TEST: fake toast queued")
         }
-        if toast != nil && now - toastT0 > toastSecs {
-            toast = nil; toastTex = nil
+        // The status card first: while one is set it IS the toast, without
+        // the expiry, and the queue waits behind it.
+        let status = KLHUDStatus.current()
+        if status != statusShown {
+            statusShown = status
+            if let status {
+                let t = KLToast(api: "status", name: status.name, desc: status.desc,
+                                icon: "", header: status.header)
+                toast = t
+                toastT0 = now
+                toastTex = KLToastRaster.texture(t, device: device)
+                NSLog("[toast] status card: \(status.header) — \(status.name)")
+            } else {
+                toast = nil; toastTex = nil
+            }
         }
-        if toast == nil, let next = KleptonToasts.shared.pop() {
-            toast = next
-            toastT0 = now
-            toastTex = KLToastRaster.texture(next, device: device)
-            NSLog("[toast] showing \"\(next.name)\" (\(KleptonToasts.header))"
-                  + (toastTex == nil ? " — raster FAILED" : ""))
+        if statusShown == nil {
+            if toast != nil && now - toastT0 > toastSecs {
+                toast = nil; toastTex = nil
+            }
+            if toast == nil, let next = KleptonToasts.shared.pop() {
+                toast = next
+                toastT0 = now
+                toastTex = KLToastRaster.texture(next, device: device)
+                NSLog("[toast] showing \"\(next.name)\" (\(KleptonToasts.header))"
+                      + (toastTex == nil ? " — raster FAILED" : ""))
+            }
         }
         guard toast != nil else { toastAlpha = 0; toastPos = nil; return }
         let e = now - toastT0
-        toastAlpha = Float(max(0, min(1, min(e / 0.3, (toastSecs - e) / 0.3))))
+        toastAlpha = statusShown != nil
+            ? Float(max(0, min(1, e / 0.3)))
+            : Float(max(0, min(1, min(e / 0.3, (toastSecs - e) / 0.3))))
 
         // Lazy follow: the target is 1.2 m ahead along the head's YAW, 15 cm
         // below the eyes; the panel eases toward it (time constant 0.35 s), so

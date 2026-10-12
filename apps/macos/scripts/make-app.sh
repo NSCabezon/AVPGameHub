@@ -1,5 +1,5 @@
 #!/bin/bash
-# Release build of AVP Game Hub, wrapped as an .app bundle (ad-hoc signed) in MacHub/build/.
+# Release build of AVP Game Hub, wrapped as an .app bundle (ad-hoc signed) in build/ beside Package.swift.
 #   scripts/make-app.sh && open "build/AVP Game Hub.app"
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -49,7 +49,7 @@ if [ -n "$TOOL" ]; then
   chmod 755 "$APP/Contents/Resources/Tools/ovr-platform-util"
   echo "bundled Meta's tool from $TOOL"
 else
-  echo "no Meta-signed ovr-platform-util found locally; not bundled (the app can fetch it: Accounts › Meta)"
+  echo "no Meta-signed ovr-platform-util found locally; not bundled (the app helps you get it: Status › Get Meta's tool opens Meta's page and picks the download up from ~/Downloads)"
 fi
 codesign --force --sign - "$APP" >/dev/null
 echo "built: $PWD/$APP"

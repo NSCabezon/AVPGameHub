@@ -176,10 +176,32 @@ enum SteamGames {
         verifyNextLaunchKey: "kl.steam.verifyNextLaunch.superhot",
         apk: "shvr.apk")
 
+    /// Metro Awakening — the Steam Frame build: the Android depot is the APK
+    /// (Impact-Android-Shipping-arm64.apk, 50 MB) and the game's 14 OBBs
+    /// (main.944116 + chunk.1..12 + chunk.20, IoStore paks, stored zips). The
+    /// depot root IS the OBB directory UE builds for itself
+    /// (<files>/Android/obb/<package>, targets.py "obb"), so the OBBs are read
+    /// where they land, with no second copy; the APK beside them is what the hub
+    /// derives metro.apk and metro/assets from (KleptonHubPrep.swift). Ownership
+    /// is Steam's (no depot key without a licence), and in game the real account
+    /// answers through the Steam bridge.
+    static let metro = SteamGameDescriptor(
+        target: "metro", title: "Metro Awakening", appID: 2669410,
+        depots: [2669412], osFilter: nil, branch: "public",
+        dataSubpath: "android-files/Android/obb/com.vertigogames.ImpactDevelopment",
+        legacyDataSubpath: nil,
+        include: { _ in true },
+        presenceProbes: ["Impact-Android-Shipping-arm64.apk",
+                         "main.944116.com.vertigogames.ImpactDevelopment.obb"],
+        approxBytes: 19_300_000_000,
+        verifyNextLaunchKey: "kl.steam.verifyNextLaunch.metro",
+        apk: "Impact-Android-Shipping-arm64.apk")
+
     /// One line per downloadable game.
     static let all: [String: SteamGameDescriptor] = [
         "alyx": alyx,
         "superhot": superhot,
+        "metro": metro,
     ]
 
     static func descriptor(for target: String) -> SteamGameDescriptor? { all[target] }
@@ -250,6 +272,11 @@ final class SteamContentModel: ObservableObject {
         switch stage { case .connecting, .qr, .working, .guardCode, .approve: return true; default: return false }
     }
 
+    /// A start() is in flight, from the moment it is called (isBusy follows the stage, which
+    /// the run sets a moment later) until its task has ended. The hub's "Download all" queue
+    /// waits on this.
+    var isRunning: Bool { task != nil }
+
     func refreshLocal() {
         local = game.status()
         let root = game.root
@@ -272,15 +299,15 @@ final class SteamContentModel: ObservableObject {
 
     func submitCode(_ code: String) {
         guard let session, let auth = pendingAuth, let type = pendingCodeType else { return }
-        stage = .connecting("Checking code…")
+        stage = .connecting(klL("Checking code…", "Comprobando código…"))
         Task {
             do {
                 try await session.submitGuardCode(auth, code: code, type: type)
                 // The poller in run() finishes the sign-in.
-                if case .connecting = stage { stage = .connecting("Code accepted, signing in…") }
+                if case .connecting = stage { stage = .connecting(klL("Code accepted, signing in…", "Código aceptado, iniciando sesión…")) }
             } catch {
                 stage = .guardCode(type: type.description, canApprove: auth.canApproveOnDevice,
-                                   error: "That code was not accepted — try again.")
+                                   error: klL("That code was not accepted — try again.", "No se ha aceptado ese código. Inténtalo de nuevo."))
             }
         }
     }
@@ -344,7 +371,7 @@ final class SteamContentModel: ObservableObject {
                 guard let saved = try? store.load() else { stage = .signIn(nil); return }
                 creds = saved
             case .password(let user, let password):
-                stage = .connecting("Contacting Steam…")
+                stage = .connecting(klL("Contacting Steam…", "Conectando con Steam…"))
                 try await session.connect()
                 let device = "AVP Game Hub (\(UIDevice.current.name))"
                 let auth: CredentialsAuthSession
@@ -360,18 +387,18 @@ final class SteamContentModel: ObservableObject {
                 if let code = auth.needsCode {
                     stage = .guardCode(type: code.description, canApprove: auth.canApproveOnDevice, error: nil)
                 } else if auth.canApproveOnDevice {
-                    stage = .approve("Approve this sign-in in the Steam app on your phone.")
+                    stage = .approve(klL("Approve this sign-in in the Steam app on your phone.", "Aprueba este inicio de sesión en la app de Steam de tu móvil."))
                 } else if auth.canApproveByEmail {
-                    stage = .approve("Approve this sign-in from the e-mail Steam just sent you.")
+                    stage = .approve(klL("Approve this sign-in from the e-mail Steam just sent you.", "Aprueba este inicio de sesión desde el correo que te acaba de enviar Steam."))
                 } else {
-                    stage = .connecting("Signing in…")
+                    stage = .connecting(klL("Signing in…", "Iniciando sesión…"))
                 }
                 creds = try await session.waitForCredentialsAuth(auth)
                 pendingAuth = nil
                 try store.save(creds)
                 log("signed in with account name/password as '\(KLAccountPrivacy.mask(creds.accountName))'")
             case .qr:
-                stage = .connecting("Contacting Steam…")
+                stage = .connecting(klL("Contacting Steam…", "Conectando con Steam…"))
                 try await session.connect()
                 let device = "AVP Game Hub (\(UIDevice.current.name))"
                 creds = try await session.authenticateWithQR(deviceName: device) { url in
@@ -382,7 +409,7 @@ final class SteamContentModel: ObservableObject {
                 try store.save(creds)
             }
 
-            stage = .connecting("Signing in to Steam…")
+            stage = .connecting(klL("Signing in to Steam…", "Iniciando sesión en Steam…"))
             if case .saved = method { try await session.connect() }
             do {
                 try await session.logOn(creds)
@@ -390,7 +417,7 @@ final class SteamContentModel: ObservableObject {
                 log("saved sign-in rejected (EResult \(r))")
                 try? store.clear()
                 account = nil
-                stage = .signIn("Your saved Steam sign-in has expired. Please sign in again.")
+                stage = .signIn(klL("Your saved Steam sign-in has expired. Please sign in again.", "Tu sesión guardada de Steam ha caducado. Inicia sesión de nuevo."))
                 return
             }
             account = creds.accountName
@@ -401,14 +428,14 @@ final class SteamContentModel: ObservableObject {
             var depots = game.depots
             if depots.isEmpty {
                 // Discovery: every depot of the app whose oslist matches the filter.
-                stage = .connecting("Finding \(game.title)'s files on Steam…")
+                stage = .connecting(klL("Finding \(game.title)'s files on Steam…", "Buscando los archivos de \(game.title) en Steam…"))
                 let os = game.osFilter?.lowercased()
                 depots = try await downloader.depots(app: game.appID, branch: game.branch)
                     .filter { d in os.map { o in d.osList.contains { $0.lowercased() == o } } ?? true }
                     .filter { $0.manifestID != nil }
                     .map(\.depotID)
                 guard !depots.isEmpty else {
-                    stage = .failed("Steam lists no \(game.osFilter ?? "") depot for \(game.title) on this account.")
+                    stage = .failed(klL("Steam lists no \(game.osFilter ?? "") depot for \(game.title) on this account.", "Steam no lista ningún depot \(game.osFilter ?? "") de \(game.title) en esta cuenta."))
                     return
                 }
                 game.rememberDepots(depots)
@@ -506,20 +533,22 @@ struct SteamContentView: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .firstTextBaseline) {
                 if let onBack {
-                    Button { onBack() } label: { Label("Library", systemImage: "chevron.left") }
+                    Button { onBack() } label: { Label(klL("Library", "Biblioteca"), systemImage: "chevron.left") }
                 }
                 Text(model.game.title).font(.largeTitle.bold())
                 Spacer()
                 if model.account != nil {
                     Text(KLAccountPrivacy.steamLabel).font(.footnote).foregroundStyle(.secondary)
-                    Button("Sign out") { model.signOut() }.font(.footnote).disabled(model.isBusy)
+                    Button(klL("Sign out", "Cerrar sesión")) { model.signOut() }.font(.footnote).disabled(model.isBusy)
                 }
             }
             content
             Spacer(minLength: 0)
             if model.isBusy {
-                Label("Keep this window open and the headset on: visionOS pauses apps in the background, "
+                Label(klL("Keep this window open and the headset on: visionOS pauses apps in the background, "
                       + "and the download stops with it. It resumes where it left off on the next launch.",
+                      "Mantén esta ventana abierta y el visor puesto: visionOS pausa las apps en segundo plano "
+                      + "y la descarga se detiene con ellas. Se reanuda donde se quedó en el siguiente arranque."),
                       systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(.secondary)
             }
@@ -555,9 +584,9 @@ struct SteamContentView: View {
             SteamGuardCodeForm(model: model, type: type, canApprove: canApprove, error: error)
         case .approve(let text):
             VStack(alignment: .leading, spacing: 14) {
-                Text("Confirm the sign-in").font(.title2.bold())
+                Text(klL("Confirm the sign-in", "Confirma el inicio de sesión")).font(.title2.bold())
                 HStack(spacing: 12) { ProgressView(); Text(text) }
-                Button("Cancel") { model.cancelSignIn() }
+                Button(klL("Cancel", "Cancelar")) { model.cancelSignIn() }
             }
         case .qr(let url):
             HStack(alignment: .top, spacing: 28) {
@@ -566,39 +595,42 @@ struct SteamContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Sign in with a QR code").font(.title2.bold())
-                    Text("Scan it with the Steam app on a phone (Steam Guard shield → “Scan a QR code”). "
+                    Text(klL("Sign in with a QR code", "Inicia sesión con un código QR")).font(.title2.bold())
+                    Text(klL("Scan it with the Steam app on a phone (Steam Guard shield → “Scan a QR code”). "
                          + "A headset's own display can't be seen by a phone camera, so this mostly helps when "
-                         + "mirroring the view; the same link is written to the device log as “[steam] QR url:”.")
-                    Button("Back") { model.cancelSignIn() }
+                         + "mirroring the view; the same link is written to the device log as “[steam] QR url:”.",
+                         "Escanéalo con la app de Steam en un móvil (escudo de Steam Guard → “Escanear un código QR”). "
+                         + "La cámara de un móvil no puede ver la pantalla del visor, así que sirve sobre todo "
+                         + "al duplicar la vista; el mismo enlace se escribe en el registro del dispositivo como “[steam] QR url:”."))
+                    Button(klL("Back", "Atrás")) { model.cancelSignIn() }
                 }
             }
         case .working: working
         case .paused:
             VStack(alignment: .leading, spacing: 12) {
-                Text("Paused.").font(.title3)
+                Text(klL("Paused.", "En pausa.")).font(.title3)
                 progressSummary
                 HStack {
-                    Button("Resume") { model.start() }.buttonStyle(.borderedProminent)
-                    if model.game.looksPresent { Button("Play anyway") { onPlay() } }
+                    Button(klL("Resume", "Reanudar")) { model.start() }.buttonStyle(.borderedProminent)
+                    if model.game.looksPresent { Button(klL("Play anyway", "Jugar igualmente")) { onPlay() } }
                 }
             }
         case .complete:
             VStack(alignment: .leading, spacing: 12) {
-                Label("\(model.game.title) is installed and verified.", systemImage: "checkmark.circle.fill")
+                Label(klL("\(model.game.title) is installed and verified.", "\(model.game.title) está instalado y verificado."), systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green).font(.title3)
-                Text("\(model.local.totalFiles) files, \(gb(model.local.totalBytes)).").foregroundStyle(.secondary)
+                Text(klL("\(model.local.totalFiles) files, \(gb(model.local.totalBytes)).", "\(model.local.totalFiles) archivos, \(gb(model.local.totalBytes)).")).foregroundStyle(.secondary)
                 HStack(spacing: 16) {
-                    Button("Play") { onPlay() }.buttonStyle(.borderedProminent).controlSize(.large)
-                    Button("Check for updates / Verify files") { model.start(forceVerify: true) }
+                    Button(klL("Play", "Jugar")) { onPlay() }.buttonStyle(.borderedProminent).controlSize(.large)
+                    Button(klL("Check for updates / Verify files", "Buscar actualizaciones / Verificar archivos")) { model.start(forceVerify: true) }
                 }
             }
         case .failed(let msg):
             VStack(alignment: .leading, spacing: 12) {
                 Label(msg, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
                 HStack {
-                    Button("Retry") { model.start() }.buttonStyle(.borderedProminent)
-                    if model.game.looksPresent { Button("Play anyway") { onPlay() } }
+                    Button(klL("Retry", "Reintentar")) { model.start() }.buttonStyle(.borderedProminent)
+                    if model.game.looksPresent { Button(klL("Play anyway", "Jugar igualmente")) { onPlay() } }
                 }
             }
         }
@@ -608,20 +640,20 @@ struct SteamContentView: View {
         let present = model.game.looksPresent
         VStack(alignment: .leading, spacing: 12) {
             if present {
-                Text("Game files were found on this device, but they have not been verified as complete.")
-                Text("SteamDepot can check them against Steam (keeping every file that matches) and download only what is missing.")
+                Text(klL("Game files were found on this device, but they have not been verified as complete.", "Se han encontrado archivos del juego en este dispositivo, pero no se han verificado como completos."))
+                Text(klL("SteamDepot can check them against Steam (keeping every file that matches) and download only what is missing.", "SteamDepot puede compararlos con Steam (conservando cada archivo que coincida) y descargar solo lo que falta."))
                     .foregroundStyle(.secondary)
             } else {
-                Text("The game content (about \(Int((Double(model.game.approxBytes) / 1e9).rounded())) GB) is not on this device yet.")
-                Text("Download it from Steam with the account that owns \(model.game.title).").foregroundStyle(.secondary)
+                Text(klL("The game content (about \(Int((Double(model.game.approxBytes) / 1e9).rounded())) GB) is not on this device yet.", "El contenido del juego (unos \(Int((Double(model.game.approxBytes) / 1e9).rounded())) GB) aún no está en este dispositivo."))
+                Text(klL("Download it from Steam with the account that owns \(model.game.title).", "Descárgalo de Steam con la cuenta que tiene \(model.game.title).")).foregroundStyle(.secondary)
             }
             if let free = model.freeBytes {
-                Text("Free space: \(gb(free))").font(.footnote).foregroundStyle(free < model.game.approxBytes + 5_000_000_000 && !present ? .orange : .secondary)
+                Text(klL("Free space: \(gb(free))", "Espacio libre: \(gb(free))")).font(.footnote).foregroundStyle(free < model.game.approxBytes + 5_000_000_000 && !present ? .orange : .secondary)
             }
             HStack(spacing: 16) {
-                Button(present ? "Complete download from Steam" : "Download \(model.game.title) from Steam") { model.start() }
+                Button(present ? klL("Complete download from Steam", "Completar descarga desde Steam") : klL("Download \(model.game.title) from Steam", "Descargar \(model.game.title) desde Steam")) { model.start() }
                     .buttonStyle(.borderedProminent).controlSize(.large)
-                if present { Button("Play anyway") { onPlay() } }
+                if present { Button(klL("Play anyway", "Jugar igualmente")) { onPlay() } }
             }
             if !SteamGameDescriptor.debugFilters.isEmpty {
                 Text("KL_STEAM_FILTER: \(SteamGameDescriptor.debugFilters.joined(separator: ", "))").font(.caption).foregroundStyle(.orange)
@@ -634,30 +666,30 @@ struct SteamContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             switch p.phase {
             case .preparing:
-                HStack(spacing: 12) { ProgressView(); Text(p.message.isEmpty ? "Preparing…" : p.message) }
+                HStack(spacing: 12) { ProgressView(); Text(p.message.isEmpty ? klL("Preparing…", "Preparando…") : p.message) }
             case .verifying:
-                Text("Verifying existing files…").font(.title3)
+                Text(klL("Verifying existing files…", "Verificando archivos existentes…")).font(.title3)
                 ProgressView(value: Double(p.verifyBytesDone), total: Double(max(1, p.verifyBytesTotal)))
-                Text("\(gb(p.verifyBytesDone)) of \(gb(p.verifyBytesTotal)) checked · \(p.verifyFilesDone)/\(p.verifyFilesTotal) files · \(mbps(model.verifySpeed))")
+                Text(klL("\(gb(p.verifyBytesDone)) of \(gb(p.verifyBytesTotal)) checked · \(p.verifyFilesDone)/\(p.verifyFilesTotal) files · \(mbps(model.verifySpeed))", "\(gb(p.verifyBytesDone)) de \(gb(p.verifyBytesTotal)) comprobados · \(p.verifyFilesDone)/\(p.verifyFilesTotal) archivos · \(mbps(model.verifySpeed))"))
                     .monospacedDigit().foregroundStyle(.secondary)
             case .downloading, .finished:
-                Text((p.chunksTotal == 0 ? "Finishing…" : "Downloading from Steam…")
-                     + (model.depotIndex > 0 ? " (depot \(model.depotIndex) of \(model.depotCount))" : "")).font(.title3)
+                Text((p.chunksTotal == 0 ? klL("Finishing…", "Terminando…") : klL("Downloading from Steam…", "Descargando de Steam…"))
+                     + (model.depotIndex > 0 ? klL(" (depot \(model.depotIndex) of \(model.depotCount))", " (depot \(model.depotIndex) de \(model.depotCount))") : "")).font(.title3)
                 let have = Double(p.depotBytes - p.bytesToDownload + p.bytesDownloaded)
                 ProgressView(value: have, total: Double(max(1, p.depotBytes)))
-                Text("\(gbD(have)) of \(gb(p.depotBytes)) · \(mbps(model.speed)) (network \(mbps(model.networkSpeed))) · ETA \(eta(Double(p.bytesToDownload - p.bytesDownloaded) / max(1, model.speed)))")
+                Text(klL("\(gbD(have)) of \(gb(p.depotBytes)) · \(mbps(model.speed)) (network \(mbps(model.networkSpeed))) · ETA \(eta(Double(p.bytesToDownload - p.bytesDownloaded) / max(1, model.speed)))", "\(gbD(have)) de \(gb(p.depotBytes)) · \(mbps(model.speed)) (red \(mbps(model.networkSpeed))) · Quedan \(eta(Double(p.bytesToDownload - p.bytesDownloaded) / max(1, model.speed)))"))
                     .monospacedDigit()
-                Text("Files \(p.completedFiles)/\(p.totalFiles) · this session \(gb(p.bytesDownloaded)) of \(gb(p.bytesToDownload)) fetched")
+                Text(klL("Files \(p.completedFiles)/\(p.totalFiles) · this session \(gb(p.bytesDownloaded)) of \(gb(p.bytesToDownload)) fetched", "Archivos \(p.completedFiles)/\(p.totalFiles) · en esta sesión \(gb(p.bytesDownloaded)) de \(gb(p.bytesToDownload)) descargados"))
                     .monospacedDigit().font(.footnote).foregroundStyle(.secondary)
             }
-            Button("Pause") { model.pause() }
+            Button(klL("Pause", "Pausar")) { model.pause() }
         }
     }
 
     @ViewBuilder private var progressSummary: some View {
         let p = model.progress
         if p.depotBytes > 0 {
-            Text("\(gbD(Double(p.depotBytes - p.bytesToDownload + p.bytesDownloaded))) of \(gb(p.depotBytes))")
+            Text(klL("\(gbD(Double(p.depotBytes - p.bytesToDownload + p.bytesDownloaded))) of \(gb(p.depotBytes))", "\(gbD(Double(p.depotBytes - p.bytesToDownload + p.bytesDownloaded))) de \(gb(p.depotBytes))"))
                 .monospacedDigit().foregroundStyle(.secondary)
         }
     }
@@ -669,7 +701,7 @@ struct SteamContentMaintenance: View {
     @State private var scheduled = false
     var body: some View {
         HStack {
-            Button(scheduled ? "Verify scheduled for next launch" : "Check for updates / Verify files on next launch") {
+            Button(scheduled ? klL("Verify scheduled for next launch", "Verificación programada para el próximo arranque") : klL("Check for updates / Verify files on next launch", "Buscar actualizaciones / Verificar archivos en el próximo arranque")) {
                 scheduled.toggle()
                 UserDefaults.standard.set(scheduled, forKey: game.verifyNextLaunchKey)
             }
@@ -696,10 +728,10 @@ struct SteamSignInForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Sign in to Steam").font(.title2.bold())
-            Text("Use the Steam account that owns \(model.game.title).").foregroundStyle(.secondary)
+            Text(klL("Sign in to Steam", "Inicia sesión en Steam")).font(.title2.bold())
+            Text(klL("Use the Steam account that owns \(model.game.title).", "Usa la cuenta de Steam que tiene \(model.game.title).")).foregroundStyle(.secondary)
             if let message { Label(message, systemImage: "exclamationmark.circle").foregroundStyle(.orange) }
-            TextField("Steam account name", text: $user)
+            TextField(klL("Steam account name", "Nombre de cuenta de Steam"), text: $user)
                 .textContentType(.username)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -707,25 +739,27 @@ struct SteamSignInForm: View {
                 .submitLabel(.next)
                 .onSubmit { focus = .password }
                 .frame(maxWidth: 420)
-            SecureField("Password", text: $password)
+            SecureField(klL("Password", "Contraseña"), text: $password)
                 .textContentType(.password)
                 .focused($focus, equals: .password)
                 .submitLabel(.go)
                 .onSubmit(submit)
                 .frame(maxWidth: 420)
             HStack(spacing: 16) {
-                Button("Sign in", action: submit)
+                Button(klL("Sign in", "Iniciar sesión"), action: submit)
                     .buttonStyle(.borderedProminent)
                     .disabled(user.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
-                Button(showOther ? "Hide other ways" : "Other ways to sign in…") { showOther.toggle() }
+                Button(showOther ? klL("Hide other ways", "Ocultar otras formas") : klL("Other ways to sign in…", "Otras formas de iniciar sesión…")) { showOther.toggle() }
             }
-            Text("Your password is sent to Steam encrypted and is never stored; only a sign-in token is kept, in this device's Keychain.")
+            Text(klL("Your password is sent to Steam encrypted and is never stored; only a sign-in token is kept, in this device's Keychain.", "Tu contraseña se envía cifrada a Steam y nunca se guarda; solo se conserva un token de sesión, en el llavero de este dispositivo."))
                 .font(.footnote).foregroundStyle(.secondary)
             if showOther {
                 VStack(alignment: .leading, spacing: 8) {
-                    Button("Show a QR code (scan with the Steam app)") { model.signInWithQR() }
-                    Text("From a Mac: sign in with the steamdepot tool, then copy its token.json into this app's "
-                         + "Documents as steamdepot-token.json (devicectl) and press Download again.")
+                    Button(klL("Show a QR code (scan with the Steam app)", "Mostrar un código QR (escanéalo con la app de Steam)")) { model.signInWithQR() }
+                    Text(klL("From a Mac: sign in with the steamdepot tool, then copy its token.json into this app's "
+                         + "Documents as steamdepot-token.json (devicectl) and press Download again.",
+                         "Desde un Mac: inicia sesión con la herramienta steamdepot, copia su token.json en los "
+                         + "Documentos de esta app como steamdepot-token.json (devicectl) y pulsa Descargar de nuevo."))
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .padding(.top, 4)
@@ -758,13 +792,13 @@ struct SteamGuardCodeForm: View {
             if canApprove {
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text("Approve this sign-in in the Steam app on your phone — or enter the \(type) below.")
+                    Text(klL("Approve this sign-in in the Steam app on your phone — or enter the \(type) below.", "Aprueba este inicio de sesión en la app de Steam de tu móvil, o introduce abajo el \(type)."))
                 }
             } else {
-                Text("Enter the \(type).")
+                Text(klL("Enter the \(type).", "Introduce el \(type)."))
             }
             if let error { Label(error, systemImage: "exclamationmark.circle").foregroundStyle(.orange) }
-            TextField("Code", text: $code)
+            TextField(klL("Code", "Código"), text: $code)
                 .textContentType(.oneTimeCode)
                 .textInputAutocapitalization(.characters)
                 .autocorrectionDisabled()
@@ -773,8 +807,8 @@ struct SteamGuardCodeForm: View {
                 .frame(maxWidth: 220)
                 .font(.title3.monospaced())
             HStack(spacing: 16) {
-                Button("Submit", action: submit).buttonStyle(.borderedProminent).disabled(code.count < 5)
-                Button("Cancel") { model.cancelSignIn() }
+                Button(klL("Submit", "Enviar"), action: submit).buttonStyle(.borderedProminent).disabled(code.count < 5)
+                Button(klL("Cancel", "Cancelar")) { model.cancelSignIn() }
             }
         }
         .onAppear { focused = !canApprove }

@@ -355,6 +355,15 @@ final class KleptonCompositor {
     // like a pacing choice.
     private let syncGuest = klEnvOn("KL_SYNC_GUEST", default: false)
                             && kl_app_target_owns_frame_loop() == 0
+                            && !KLStreamSession.shared.active
+
+    // "Jugar desde el Mac" (KleptonStreamClient.swift). Non-nil when this
+    // space was opened for a stream: no guest is started, and the frame the
+    // composite shows comes from the Mac through the same eye/frame-record
+    // seam a local guest fills. Decided once, at construction — the hub sets
+    // it before it opens the space. nil = standalone, and every path below is
+    // then exactly what it was.
+    private let stream: KLStreamSession? = KLStreamSession.shared.active ? KLStreamSession.shared : nil
 
     // How many drawables went out before the guest had a picture to put in
     // them. Counted rather than logged per frame, because on device it is
@@ -477,7 +486,7 @@ final class KleptonCompositor {
     private let depthMode = Int(kl_reproject_depth_mode())
     private var anchorRing: [(t: TimeInterval, anchor: DeviceAnchor)] = []
     private var anchorRingNext = 0
-    private static let anchorRingSize = 32           // ~355 ms at 90 Hz
+    private static let anchorRingSize = 64           // ~710 ms at 90 Hz (the Mac stream adds Wi-Fi + encode)
     private var depthPipeline: MTLRenderPipelineState?
     private var depthProbePipeline: MTLComputePipelineState?
     private var depthProbeBuffers: [MTLBuffer] = []
@@ -800,6 +809,11 @@ final class KleptonCompositor {
     /// with this frame's pose rather than the previous one's — the same
     /// ordering reason the Choreographer is ticked before nativeRender.
     private func updatePoses(at presentationTime: TimeInterval) {
+        #if targetEnvironment(simulator)
+        // No world tracking in the Simulator: a stream still needs a head pose
+        // to send, so publish a fixed standing one (KLStreamSession).
+        if !arRunning, let stream { stream.simulatorHead(at: presentationTime) }
+        #endif
         guard arRunning else { return }
 
         // Predicted to the presentation time, not "now": the pose the guest
@@ -1662,7 +1676,12 @@ final class KleptonCompositor {
         // The device measurement was taken against it and the device has
         // never been run with either. It is the A/B for anything that looks
         // like a pacing regression.
-        if syncGuest {
+        if let stream {
+            // No guest in this process: the Mac runs it. The display is
+            // measured now, which is everything HELLO describes.
+            NSLog("[cp] stream mode — no local guest; frames come from the Mac")
+            stream.displayReady()
+        } else if syncGuest {
             NSLog("[cp] KL_SYNC_GUEST — driving the guest inline on this thread")
             if kl_app_lifecycle_begin() != 0 {
                 NSLog("[cp] lifecycle_begin failed: \(String(cString: kl_app_status()))")
@@ -1742,7 +1761,12 @@ final class KleptonCompositor {
         // Ends the guest's loop and joins it, so its report — which is the
         // lifecycle report, and belongs to the guest's end of the run rather than
         // to this one — has been written before this returns.
-        if syncGuest { kl_app_lifecycle_report() } else { kl_app_guest_stop() }
+        if stream != nil {
+            // The session itself is the window's to end (BYE + back to the
+            // library); a layer invalidated under it (Digital Crown, the space
+            // dismissed) just leaves the HUD card behind.
+            KLHUDStatus.set(nil)
+        } else if syncGuest { kl_app_lifecycle_report() } else { kl_app_guest_stop() }
     }
 
     /// What each swapchain stage actually holds, per report interval.
@@ -1935,9 +1959,11 @@ final class KleptonCompositor {
         // started, which Compositor Services aborts on.
 
         // Poses first, then the frame that uses them.
+        var posePresentation: TimeInterval = 0
         if let timing {
-            updatePoses(at: LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime)
-                            .timeInterval)
+            posePresentation = LayerRenderer.Clock.Instant.epoch
+                .duration(to: timing.presentationTime).timeInterval
+            updatePoses(at: posePresentation)
         }
 
         // Offer the guest this frame's pose and carry straight on. The guest
@@ -1950,7 +1976,17 @@ final class KleptonCompositor {
         // picture already there against the newer pose. That case is the whole
         // reason the pass exists, and it was unreachable while the thing being
         // reprojected was the thing blocking this loop.
-        if syncGuest {
+        if let stream {
+            // The stream's frame source, at the moment a local guest would be
+            // offered its frame: send this frame's POSE, and file the newest
+            // decoded picture from the Mac as the latest complete stage (with
+            // the pose it was rendered with) — read back below exactly like a
+            // guest's.
+            if posePresentation > 0 {
+                stream.tick(presentation: posePresentation, device: device, queue: queue,
+                            connectedMask: controllers.senseConnected ? 3 : 0)
+            }
+        } else if syncGuest {
             _ = kl_app_frame()
         } else {
             kl_app_guest_publish()
@@ -2033,7 +2069,8 @@ final class KleptonCompositor {
         }
         let glFence = kl_glfb_gpu_fence_value()
         lastGlFenceSeen = glFence; lastProjLayersSeen = projLayerCount
-        let frameValue = glFence != 0 ? glFence : kl_vulkan_frame_serial()
+        let frameValue = stream.map { UInt64($0.lastFrameId) }
+            ?? (glFence != 0 ? glFence : kl_vulkan_frame_serial())
         // KL_CP_NOFENCE=1 skips the wait. A composite command buffer that waits
         // on an event value the guest's queue never signals is COMMITTED and
         // never EXECUTES: the drawable is presented, every counter here looks
@@ -4164,6 +4201,7 @@ final class KleptonCompositor {
                          (atan(t.x) + atan(t.y)) * 180 / .pi,
                          (atan(t.z) + atan(t.w)) * 180 / .pi))
             kl_ovrp_set_eye_frustum(Int32(i), t.x, t.y, t.z, t.w)
+            stream?.noteEyeFrustum(i, t)
         }
 
         // The frame interval, as the median of the gaps between successive

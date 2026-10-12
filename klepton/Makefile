@@ -11,7 +11,7 @@ MVK_INC := -Ivendor-moltenvk/out/include
 # too. One -I per source directory is what buys that; gen_xcodeproj.py carries
 # the same list as HEADER_SEARCH_PATHS.
 RUNTIME_INC := -Iruntime -Iruntime/jni -Iruntime/libc -Iruntime/gfx -Iruntime/xr \
-               -Iruntime/media -Iruntime/guest -Iruntime/diag
+               -Iruntime/media -Iruntime/guest -Iruntime/diag -Iruntime/net
 CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(RUNTIME_INC)
 # VideoToolbox/CoreMedia/CoreVideo are the video decoder (kl_vtdec.c), and they
 # are in the base LDLIBS rather than on one target because kl_vtdec is in
@@ -69,7 +69,8 @@ RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_stub_cells.S runt
            runtime/guest/kl_guestpoke.c runtime/kl_cacerts.c runtime/media/kl_phonon_hrtf.S \
            runtime/media/kl_menu_font.S \
            runtime/diag/kl_sample.c runtime/diag/kl_mprobe.c runtime/diag/kl_stall.c \
-           runtime/guest/kl_songs.c
+           runtime/guest/kl_songs.c \
+           runtime/net/kl_stream_client.c
 RUNTIME_DIAG := runtime/diag/kl_metadump.c
 RUNTIME := $(RUNTIME_SHIP) $(RUNTIME_DIAG)
 
@@ -329,6 +330,54 @@ build/t_hevc: tests/t_hevc.c $(RUNTIME) $(RUNTIME_HDRS)
 hevc: build/t_hevc
 	./build/t_hevc
 
+# "Jugar desde el Mac" (runtime/net/kl_stream_proto.h). The headset client's C
+# half (kl_stream_client.c) is in the shipping runtime above; these are its
+# two Mac-side test tools:
+#
+#   build/kl_stream_testhost   a HOST with a synthetic world-locked scene
+#                              (HEVC over UDP, Bonjour) — point the hub at it
+#   build/kl_stream_harness    the CLIENT's C code, headless, against a host:
+#                              POSE at 90 Hz, reassembly, decode, ring-pose
+#                              check, PNGs in build/stream/
+#
+# `make streamtest` runs one against the other on loopback, clean, then with
+# 1% packet loss twice: with the default FEC (losses rebuilt from parity) and
+# with KL_STREAM_FEC=0 (recovered by IDR requests). Not in `make
+# check`: it needs the hardware HEVC encoder and a free UDP port.
+.PHONY: testhost streamtest
+build/kl_stream_testhost: tools/kl_stream_testhost.m runtime/net/kl_stream_proto.h \
+                          runtime/net/kl_stream_tx.c runtime/net/kl_stream_tx.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -O2 -fobjc-arc -o $@ tools/kl_stream_testhost.m runtime/net/kl_stream_tx.c \
+	  -framework VideoToolbox -framework CoreMedia -framework CoreVideo \
+	  -framework CoreGraphics -framework CoreText -framework Foundation
+
+testhost: build/kl_stream_testhost
+
+build/kl_stream_harness: tools/kl_stream_harness.c tools/kl_stream_harness_mtl.m $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tools/kl_stream_harness.c tools/kl_stream_harness_mtl.m $(RUNTIME) $(LDLIBS) \
+	  -framework CoreGraphics -framework ImageIO -framework Metal -framework Foundation
+
+STREAMTEST_PORT ?= 19944
+streamtest: build/kl_stream_testhost build/kl_stream_harness
+	@rm -rf build/stream && mkdir -p build/stream/clean build/stream/lossy build/stream/lossy-nofec
+	@KL_TESTHOST_PORT=$(STREAMTEST_PORT) KL_TESTHOST_NAME="klepton streamtest" KL_TESTHOST_SECONDS=9 \
+	  KL_TESTHOST_HAPTICS_S=2 ./build/kl_stream_testhost > build/stream/clean/host.log 2>&1 & \
+	  sleep 0.5; ./build/kl_stream_harness 127.0.0.1 $(STREAMTEST_PORT) --seconds 6 \
+	    --out build/stream/clean > build/stream/clean/client.log 2>&1; rc=$$?; \
+	  grep -E 'harness:|HELLO_ACK|decoder up' build/stream/clean/client.log; wait; exit $$rc
+	@KL_TESTHOST_PORT=$(STREAMTEST_PORT) KL_TESTHOST_NAME="klepton streamtest" KL_TESTHOST_SECONDS=9 \
+	  KL_TESTHOST_DROP=0.01 ./build/kl_stream_testhost > build/stream/lossy/host.log 2>&1 & \
+	  sleep 0.5; ./build/kl_stream_harness 127.0.0.1 $(STREAMTEST_PORT) --seconds 6 --expect-loss \
+	    --out build/stream/lossy > build/stream/lossy/client.log 2>&1; rc=$$?; \
+	  grep -E 'harness: [0-9]|PASS|FAIL' build/stream/lossy/client.log; wait; exit $$rc
+	@KL_TESTHOST_PORT=$(STREAMTEST_PORT) KL_TESTHOST_NAME="klepton streamtest" KL_TESTHOST_SECONDS=9 \
+	  KL_TESTHOST_DROP=0.01 KL_STREAM_FEC=0 ./build/kl_stream_testhost > build/stream/lossy-nofec/host.log 2>&1 & \
+	  sleep 0.5; ./build/kl_stream_harness 127.0.0.1 $(STREAMTEST_PORT) --seconds 6 --expect-loss \
+	    --out build/stream/lossy-nofec > build/stream/lossy-nofec/client.log 2>&1; rc=$$?; \
+	  grep -E 'harness: [0-9]|PASS|FAIL' build/stream/lossy-nofec/client.log; wait; exit $$rc
+
 # The video TEXTURE gate: a natively-decoded biplanar frame through
 # CVMetalTextureCache + EGL_METAL_TEXTURE_ANGLE to sampled pixels, compared
 # against the same picture through the BGRA path. This is what proves the
@@ -430,18 +479,35 @@ fossilize:
 	git -C $(FZ_DIR) checkout -q $(FZ_REV) && git -C $(FZ_DIR) submodule -q update --init --recursive
 	@echo "Fossilize $(FZ_REV) in $(FZ_DIR); rebuild m_boot to link it"
 
+# runtime/net/kl_stream_host.{c,m} is the KL_STREAM_HOST=1 frontend ("Jugar
+# desde el Mac"): host-only like the viewer, so it is named here and nowhere in
+# RUNTIME_SHIP.
+STREAM_HOST := runtime/net/kl_stream_host.c runtime/net/kl_stream_host_mtl.m runtime/net/kl_stream_tx.c
 build/m_boot: mains/m_boot.c tests/t_mtl_provider.m $(RUNTIME) runtime/gfx/kl_view.c runtime/gfx/kl_hostwin.c \
-              runtime/gfx/kl_view_mtl.m $(RUNTIME_HDRS) $(FZ_OBJ)
+              runtime/gfx/kl_view_mtl.m $(STREAM_HOST) $(RUNTIME_HDRS) $(FZ_OBJ)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fobjc-arc $(shell pkg-config --cflags sdl3) -o $@ \
 	  mains/m_boot.c tests/t_mtl_provider.m $(RUNTIME) runtime/gfx/kl_view.c runtime/gfx/kl_hostwin.c \
-	  runtime/gfx/kl_view_mtl.m $(FZ_OBJ) $(FZ_LIBS) \
+	  runtime/gfx/kl_view_mtl.m $(STREAM_HOST) $(FZ_OBJ) $(FZ_LIBS) \
 	  $(LDLIBS) -framework Metal -framework QuartzCore -framework Foundation \
 	  -framework CoreText -framework CoreGraphics -framework ImageIO \
 	  $(shell pkg-config --libs sdl3)
 
 boot: build/m_boot
 	./build/m_boot $(LIBS)
+
+# The headset stand-in for KL_STREAM_HOST=1 (runtime/net/kl_stream_host.c):
+# HELLO with a Vision Pro-like display, POSE at 90 Hz with a yawing head, VIDEO
+# reassembled and decoded with VideoToolbox, every Nth frame written as PNG.
+#   KL_STREAM_HOST=1 KL_GLIBC_CONTENT=... ./build/m_boot alyx      (host)
+#   ./build/kl_stream_fakeclient -o build/stream-png -t 30           (client)
+build/kl_stream_fakeclient: tools/kl_stream_fakeclient.m runtime/net/kl_stream_proto.h
+	@mkdir -p build
+	$(CC) -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 -fobjc-arc -Iruntime/net -o $@ \
+	  tools/kl_stream_fakeclient.m -framework VideoToolbox -framework CoreMedia -framework CoreVideo \
+	  -framework CoreGraphics -framework ImageIO -framework Foundation
+.PHONY: stream-fakeclient
+stream-fakeclient: build/kl_stream_fakeclient
 
 # ---- guest payloads we build ourselves ----
 #

@@ -22,13 +22,14 @@ fi
 unset _kl_cfg_root _kl_line _kl_key _kl_val
 
 # A device build needs an App ID your team can register. targets.py's hub row carries a
-# placeholder (com.example.avpgamehub) that only the Simulator accepts.
+# placeholder (com.example.avpgamehub) that only the Simulator accepts, and the docs' example
+# (com.yourname.*) is no better: both are refused here, before Xcode fails less clearly.
 kl_require_bundle_id() {
   case "${1:-}" in
-    ''|com.example.*)
+    ''|com.example.*|com.yourname.*)
       echo "!! bundle id is '${1:-}' — set KLEPTON_BUNDLE_ID in local/config.env" >&2
-      echo "!!   (copy local/config.env.example; use an id under your own reverse domain," >&2
-      echo "!!   e.g. com.yourname.avpgamehub, and keep it: the game data lives in its container)" >&2
+      echo "!!   (copy local/config.env.example; use an id under YOUR own reverse domain," >&2
+      echo "!!   e.g. com.<you>.avpgamehub, and keep it: the game data lives in its container)" >&2
       exit 1 ;;
   esac
 }

@@ -3521,6 +3521,49 @@ static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
     return VK_SUCCESS;
 }
 
+// The rest of the swapchain's surface, for OUR swapchains. Every entry point
+// that takes a VkSwapchainKHR has to be answered here when the handle is one of
+// ours: handed to MoltenVK it is cast to an MVKSwapchain it is not, and the
+// first thing MoltenVK does with it is lock a mutex inside it. Metro Awakening's
+// UE5 frame pacer (VK_GOOGLE_display_timing, taken once Swappy is out of the
+// way) did exactly that every frame: vkGetPastPresentationTimingGOOGLE ->
+// MVKSwapchain::getPastPresentationTiming -> std::mutex::lock -> "mutex lock
+// failed: Invalid argument" -> abort.
+//
+// With no presentation engine there is no timing to report: the refresh cycle
+// is the stated display rate, and the past-timing queue is always empty, which
+// the extension allows (it answers only what has been recorded since the last
+// call). A pacer that reads nothing back paces by its own clock.
+float kl_ovrp_display_frequency(void);   // xr/kl_ovrp.c
+static VkResult klvk_GetRefreshCycleDurationGOOGLE(VkDevice dev, VkSwapchainKHR h,
+        VkRefreshCycleDurationGOOGLE *out) {
+    if (!swap_of(h)) {
+        PFN_vkGetRefreshCycleDurationGOOGLE real = KLVK_REAL(vkGetRefreshCycleDurationGOOGLE);
+        return real ? real(dev, h, out) : VK_ERROR_SURFACE_LOST_KHR;
+    }
+    double hz = kl_ovrp_display_frequency();
+    if (!(hz >= 30.0 && hz <= 240.0)) hz = 72.0;
+    if (out) out->refreshDuration = (uint64_t)(1e9 / hz);
+    return VK_SUCCESS;
+}
+static VkResult klvk_GetPastPresentationTimingGOOGLE(VkDevice dev, VkSwapchainKHR h,
+        uint32_t *count, VkPastPresentationTimingGOOGLE *timings) {
+    if (!swap_of(h)) {
+        PFN_vkGetPastPresentationTimingGOOGLE real = KLVK_REAL(vkGetPastPresentationTimingGOOGLE);
+        return real ? real(dev, h, count, timings) : VK_ERROR_SURFACE_LOST_KHR;
+    }
+    (void)timings;
+    if (count) *count = 0;
+    return VK_SUCCESS;
+}
+static VkResult klvk_GetSwapchainStatusKHR(VkDevice dev, VkSwapchainKHR h) {
+    if (!swap_of(h)) {
+        PFN_vkGetSwapchainStatusKHR real = KLVK_REAL(vkGetSwapchainStatusKHR);
+        return real ? real(dev, h) : VK_ERROR_SURFACE_LOST_KHR;
+    }
+    return VK_SUCCESS;
+}
+
 // Forward decls: the wild-handle -> scratch substitution used by the copy/blit
 // wrappers below, defined further down beside klvk_CreateImageView.
 static VkImage klvk_wild_scratch(void);
@@ -9627,6 +9670,8 @@ static const entry g_ours[] = {
     E(GetPhysicalDeviceSurfaceFormatsKHR), E(GetPhysicalDeviceSurfacePresentModesKHR),
     E(CreateSwapchainKHR), E(DestroySwapchainKHR), E(GetSwapchainImagesKHR),
     E(AcquireNextImageKHR), E(QueuePresentKHR),
+    E(GetRefreshCycleDurationGOOGLE), E(GetPastPresentationTimingGOOGLE),
+    E(GetSwapchainStatusKHR),
     E(AllocateMemory), E(BindImageMemory),
     E(QueueSubmit),
     E(GetPhysicalDeviceProperties),

@@ -253,6 +253,10 @@ static void klfb_debug_cb(uint32_t source, uint32_t type, uint32_t id,
     fprintf(stderr, "  [glcb] %.*s\n", length, msg ? msg : "");
 }
 
+// -1 until kl_glfb_init has asked ANGLE, then 0/1. See the probe in init.
+static int g_angle_multiview = -1;
+int kl_glfb_angle_multiview(void) { return g_angle_multiview; }
+
 int kl_glfb_init(void) {
     if (!kl_glfb_enabled() || g_ready) return g_ready;
 
@@ -448,6 +452,15 @@ int kl_glfb_init(void) {
                         "EXT_color_buffer_half_float=%s\n",
                 strstr(ext, "GL_EXT_color_buffer_float") ? "yes" : "NO",
                 strstr(ext, "GL_EXT_color_buffer_half_float") ? "yes" : "NO");
+        // Whether THIS ANGLE can compile a multiview shader. kl_egl offers
+        // GL_OVR_multiview(2) to a few targets by name; on an ANGLE whose Metal
+        // backend does not expose it (the vendored build does not), the guest
+        // bakes num_views shaders that ANGLE then refuses ("'GL_OVR_multiview2'
+        // : extension is not supported") and every stereo draw is lost — IEYTD
+        // presented a black frame at ~30 fps that way. See klgl_want_multiview.
+        g_angle_multiview = strstr(ext, "GL_OVR_multiview2") ? 1 : 0;
+        fprintf(stderr, "  [glfb] ANGLE GL_OVR_multiview2: %s\n",
+                g_angle_multiview ? "yes" : "NO");
     }
 
     // Release it. EGL binds a context to one thread at a time and *refuses* to

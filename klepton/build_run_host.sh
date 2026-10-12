@@ -92,7 +92,10 @@ TARGET="${TARGET:-${KLEPTON_TARGET:-beatsaber}}"
 # Resolved through targets.py so an unknown name stops here rather than after a
 # build, and so the log is named after the target: two targets writing one path
 # means the second run's summary describes the first.
-python3 visionos/targets.py "$TARGET" name > /dev/null || exit 1
+# --list, not a resolve: resolving a glibc target (alyx) needs the image list
+# that its first --gap run is what writes.
+python3 visionos/targets.py --list | grep -qx -- "$TARGET" || {
+  echo "!! unknown target '$TARGET' — one of: $(python3 visionos/targets.py --list | tr '\n' ' ')" >&2; exit 1; }
 LOG="${KL_LOG_OUT:-/tmp/klepton-host-$TARGET.log}"
 
 # LC_ALL=C everywhere below, and grep -a: the log carries guest bytes, and

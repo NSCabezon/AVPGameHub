@@ -1,6 +1,13 @@
 // GENERATED from avp-play recipes (MIT, github.com/myMartek/avp-play, recipes/*.json @ 22c8fe2):
 // file ids, sizes and sha256 are theirs; destinations rewritten for Klepton's container layout
 // (APK -> meta/, OBB and add-ons -> android-files/obb). One JSON document per recipe.
+// batman.json: optional voice-language packs (`locale`). de-DE and en-US carry avp-play's size and
+// sha256; the six it lists by id only (es-ES, es-419, fr-FR, it-IT, ja-JP, ko-KR) were measured
+// 2026-10-12 by downloading each id from Meta's CDN with the owner's token (HTTP 200, Meta enforces
+// ownership): size = the game's own localized-asset-manifest.txt, sha256 of the bytes received.
+// ieytd: not from avp-play — app/binary ids, size and md5 from Meta's live release channel
+// (2026-10-12); sha256 of that binary as downloaded by `metastore fetch ieytd --apk-only`.
+// ktane: likewise from Meta's live release channel (2026-10-12); sha256 of that binary as fetched.
 enum BuiltinRecipes {
     static let json: [String] = [
         #"""
@@ -1604,6 +1611,896 @@ enum BuiltinRecipes {
   }
  ],
  "origin": "avp-play recipes/store-5841245619310585.json @ 22c8fe2 (MIT, github.com/myMartek/avp-play)"
+}
+"""#,
+        #"""
+{
+ "schema": 1,
+ "id": "batman",
+ "title": "Batman: Arkham Shadow",
+ "package": "com.camouflaj.manta",
+ "versionName": "1.4.1-350961",
+ "versionCode": 350961,
+ "appId": "3551691271620960",
+ "target": "batman",
+ "files": [
+  {
+   "name": "Manta_ReleaseMaster_CL423077_379.apk",
+   "role": "apk",
+   "id": "24544647911898657",
+   "size": 75788054,
+   "sha256": "1e72fe5435f336326f49f4d04cb99a5e85754eb6de3d471e692e9fef5108f309",
+   "required": true,
+   "dest": "meta"
+  },
+  {
+   "name": "Audio_NonVO.obb",
+   "role": "audio",
+   "id": "24544643085232473",
+   "size": 3457102642,
+   "sha256": "85ecfc3c15c252e437efcf810310c534a6ddcb6c40394d252e8eb305db37d6e6",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "Audio_de-DE.obb",
+   "role": "audio-locale",
+   "id": "24544641621899286",
+   "size": 1448858236,
+   "sha256": "856df52af54c3253a606f2b5b292cd11fd4cfc63ab039e71fc8d53de2533402e",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "de-DE"
+  },
+  {
+   "name": "Audio_en-US.obb",
+   "role": "audio-locale",
+   "id": "24544641108566004",
+   "size": 1249987099,
+   "sha256": "7e6fefb2c210d933edca6675580b25af5d8783c683273e7deb78ff28c6816057",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "en-US"
+  },
+  {
+   "name": "Audio_es-ES.obb",
+   "role": "audio-locale",
+   "id": "24544641508565964",
+   "size": 1343813242,
+   "sha256": "5452249e33323bbd6d94841d0c122786e6d461cf43de726e0fd3ffe53777fcbf",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "es-ES"
+  },
+  {
+   "name": "Audio_es-419.obb",
+   "role": "audio-locale",
+   "id": "24544641711899277",
+   "size": 1407048947,
+   "sha256": "09d1099933a0dd445fae2e5184e7c7a0a1f6b43a537673e07be3e481e4d697be",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "es-419"
+  },
+  {
+   "name": "Audio_fr-FR.obb",
+   "role": "audio-locale",
+   "id": "24544641591899289",
+   "size": 1257389086,
+   "sha256": "b7579a84ac746cc950b306c90d2615b32a67d71ab9465c3ce9791b60ca894d6b",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "fr-FR"
+  },
+  {
+   "name": "Audio_it-IT.obb",
+   "role": "audio-locale",
+   "id": "24544641938565921",
+   "size": 1418577351,
+   "sha256": "fbf5431d5bee64b37374d3a2eaa4056a744545b420b24bcdbea329b51b447ed9",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "it-IT"
+  },
+  {
+   "name": "Audio_ja-JP.obb",
+   "role": "audio-locale",
+   "id": "24544641635232618",
+   "size": 1391060721,
+   "sha256": "043b59257019eaf1542e121764aa61d93605fd97061545533e51c60b8d0f952c",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "ja-JP"
+  },
+  {
+   "name": "Audio_ko-KR.obb",
+   "role": "audio-locale",
+   "id": "24544641365232645",
+   "size": 1272413266,
+   "sha256": "00eee2e8a53c5c2f1e215e6690180f598f4b8a46a418411120a87f9f9fe33a4d",
+   "required": false,
+   "dest": "android-files/obb",
+   "locale": "ko-KR"
+  },
+  {
+   "name": "DRM1.mp4",
+   "role": "video",
+   "id": "24544641561899292",
+   "size": 21205503,
+   "sha256": "5be1618b5c6396e57d52d4ebdf208f39dbaeb96fb419c1158c54fa2117c8eafc",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM2.mp4",
+   "role": "video",
+   "id": "24544641695232612",
+   "size": 19561339,
+   "sha256": "72e6d5cd71cfa9d7ec6e5d676f25bc72090a7b80d9bb85c0d7652c7530388461",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM3.mp4",
+   "role": "video",
+   "id": "24544638945232887",
+   "size": 422677813,
+   "sha256": "8dbea77bc92fac6f77493fbc88835ff97f8bf858dbb88f17e06fcaf2cee13c65",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM4.mp4",
+   "role": "video",
+   "id": "24544641705232611",
+   "size": 33243662,
+   "sha256": "06d87ed77fbb05f5e61c512c30109ff710af72b1c2b96aaf706943dcdebb7b36",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM5A.mp4",
+   "role": "video",
+   "id": "24544641441899304",
+   "size": 22336948,
+   "sha256": "8c0a28977146536700ff71a0711edf7c8e55f055462918e0a6605ef00a7bf824",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM5B.mp4",
+   "role": "video",
+   "id": "24544641041899344",
+   "size": 51383772,
+   "sha256": "d35f96713b139e466ee917d7746a7021033dacc07e5304e2c6ff86db252da29b",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM5C.mp4",
+   "role": "video",
+   "id": "24544641615232620",
+   "size": 19343606,
+   "sha256": "61385ffd6b4c670f788ef3591bed590e8047a30e1e4e4ef79be3d02c07351519",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM6.mp4",
+   "role": "video",
+   "id": "24544641065232675",
+   "size": 41314206,
+   "sha256": "cff219ae56b1506c6cfccc210be2b79c1985463e73192f72aa97f3ee97bbe3b6",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "DRM7.mp4",
+   "role": "video",
+   "id": "24544641295232652",
+   "size": 35232504,
+   "sha256": "373043bcd69c66b88d4d43414289626409566127e536ab4268098d5e3a2d5539",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "GothamToBlackgate.mp4",
+   "role": "video",
+   "id": "24544640685232713",
+   "size": 202989826,
+   "sha256": "c7f1b57796d3998ecf43c0692981c4438d5526039b185692641224b17aa4aee0",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "a07ad8e30364692ebad1c71ad2af6b08_monoscripts.bundle",
+   "role": "content-bundle",
+   "id": "24544642288565886",
+   "size": 97137,
+   "sha256": "332f5afb0dc765cbd027d42fef18f979a2daaf3e73eedc458cd6b8fc6a912053",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "a07ad8e30364692ebad1c71ad2af6b08_unitybuiltinshaders.bundle",
+   "role": "content-bundle",
+   "id": "24544644515232330",
+   "size": 143449,
+   "sha256": "f5f96bd2578b436837cacdcc6dad325b77e79096a9669ba5301e73925b4021c7",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "application_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641725232609",
+   "size": 8318423,
+   "sha256": "c1119567cd3d3f984cff9881ada896da59d6012dc8dc96edec62534d57e148d0",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "character_profiles_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642048565910",
+   "size": 4245,
+   "sha256": "8419e18a79828acdd2385eeb34621a99c79c8d067a9aa20e1548dad056a13ae9",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "characterviewerandgameover_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640131899435",
+   "size": 312895984,
+   "sha256": "b0ed6bbb6d31ef5ad766f04451fb68b4e48158ddd6f2893321f3061ee6830f46",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "data_missionsandobjectives_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642561899192",
+   "size": 85536,
+   "sha256": "d6d5cbd3acc87137d91254a5fb39960b8a12faa52206d87d238c42dcddd265b9",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "data_visiblesets_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642025232579",
+   "size": 126551,
+   "sha256": "d7eb7d7ba00f5fa97d86347de687583694955d522d96aadb4acb5ac693510411",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "debug_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642211899227",
+   "size": 40088,
+   "sha256": "4ee267fff02b3570bab3e78dc4cf47c87fccf0b07c641f99670d9b814f4d8f7c",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "defaultlocalgroup_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641188565996",
+   "size": 123105704,
+   "sha256": "8f5f2cbd35c10ac2041df2863a039685a70b6824c8ac49e2c0c1d81ee56e2430",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "duplicateassetisolation_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642975232484",
+   "size": 3691968888,
+   "sha256": "012ce5e1413da15f6cf8795c609d7bafeddaaeebacdda87dbfb678293fbf95d3",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "evidence_collections_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642185232563",
+   "size": 7123,
+   "sha256": "46ed0de98937611dcc2b199ae5d73e575a08d6b40d116dff242b9b432c0e4b30",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "face_animations_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640548566060",
+   "size": 304212634,
+   "sha256": "48fa7cf3c08de1b3e03355403f2ca9488b7cd8362b2629a5d81da11bbc22fd24",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "haptics_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642111899237",
+   "size": 437651,
+   "sha256": "54985b78cba28b26daa1562873bebf3b74e8ff28bddb14ce3085d41d7eeff102",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "idle_animation_sets_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641118566003",
+   "size": 73732102,
+   "sha256": "cf493a2122e10c8c9ad6108d08c99584e003a528a03bc81343cf9de68c3c192c",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-english(unitedstates)(en-us)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642558565859",
+   "size": 2914,
+   "sha256": "501467bcdc58daa090f2ab7d37cc3de8461a850b91c9e945db56d46b08053dbe",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-french(france)(fr-fr)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642481899200",
+   "size": 2886,
+   "sha256": "df4ea961cb8b4cc17b106893416442d221acbcf7359bebedcd3cb19b44087449",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-german(germany)(de-de)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642591899189",
+   "size": 2886,
+   "sha256": "caa8221ec18b713fb3e48cc31fcc449375a1dd1bda850d400c6583d0ce5a6ae9",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-italian(italy)(it-it)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642098565905",
+   "size": 2953,
+   "sha256": "071bad894b46346f013934eff0c064d51955e56666e5caeada257462dde58231",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-japanese(japan)(ja-jp)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642475232534",
+   "size": 2910,
+   "sha256": "c2a6265367b466eca8812d97b62b97da1927f8b42660c044b2d3fd0fb7bba246",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-korean(southkorea)(ko-kr)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642411899207",
+   "size": 2886,
+   "sha256": "f7a1fe5b984ab2348174aaaac0f3898c8ef5994f84e3b53bacfc47c2ddf87fcb",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-spanish(latam)(es-419)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642158565899",
+   "size": 2955,
+   "sha256": "6338f529bd15ec522dbe875faa4e0a88b004294ccaaaf043810cd862f6ec0a64",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-asset-tables-spanish(spain)(es-es)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642221899226",
+   "size": 2954,
+   "sha256": "d771cee61008f6925395a7a52a528ecec87cbaa2c4d603d667e804b0595771d9",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-assets-french(france)(fr-fr)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642028565912",
+   "size": 245537,
+   "sha256": "bbeaabb47730448c6b09b524e3fde4096ceab81232976d779ec18c8f3b5d1965",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-assets-japanese(japan)(ja-jp)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641855232596",
+   "size": 248251,
+   "sha256": "d4728672513cba567f22eb650df7a1f2324a0484f6480cef71f52b47e9b4ae50",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-assets-shared_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642001899248",
+   "size": 705213,
+   "sha256": "2765652b61acfe2dc66139e791a8498a204714a26002f1cf25a0f4776605805f",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-locales_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642581899190",
+   "size": 2609,
+   "sha256": "6825a99cf7d9729bacec055b70072519813c9c493d6dab28850f9cc4399d23f9",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-english(unitedstates)(en-us)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641931899255",
+   "size": 548002,
+   "sha256": "73be1c7fb5003304988a35e114f1188abfac1a3afc46e6c6b1da11dc503ed478",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-french(france)(fr-fr)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641928565922",
+   "size": 602979,
+   "sha256": "c930b6a1de7c9b47b633119deb6b14e1fd75b8806c53d90c3f42a490b9244ade",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-german(germany)(de-de)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641865232595",
+   "size": 611378,
+   "sha256": "19ad9e603ea635ff6d8f8c6a73c57109585ce000c26e0223b1a9941cdaba4b12",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-italian(italy)(it-it)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641885232593",
+   "size": 588538,
+   "sha256": "71b0f8a0dc930cd4922b2c25021fe0c82eaa2015a441082ba63e124f1ae4cf0f",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-japanese(japan)(ja-jp)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641731899275",
+   "size": 609515,
+   "sha256": "96f6157ad62f5ae36ecb7446b9c086546cd6a7aa270848d768e095be3388a67c",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-korean(southkorea)(ko-kr)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641858565929",
+   "size": 615874,
+   "sha256": "c85dcabc787d3d702df33685338753c05ce346170466d2c138acc9b3e4d1b55a",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-spanish(latam)(es-419)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641771899271",
+   "size": 583664,
+   "sha256": "072d7fdbeb1ec54b02acd1a5b0699a7f419c4b56f5dfb5d1e8bb928aa9832c80",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localization-string-tables-spanish(spain)(es-es)_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641831899265",
+   "size": 590664,
+   "sha256": "37b14431aef3ed75db845c84bffe7f0baf77e8cbf759d156f45f458d44d738ca",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "localized-asset-manifest.txt",
+   "role": "manifest",
+   "id": "24544642445232537",
+   "size": 266,
+   "sha256": "e5b4aeeb1cef882804b1d71c0bbcb1c397c5778721828f0261bf67ddb95520fa",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "main.350961.com.camouflaj.manta.obb",
+   "role": "main-obb",
+   "id": "24544645935232188",
+   "size": 626267749,
+   "sha256": "fbcaae1fe09bd33f58901ec768ff30c066215764dc1001311559611906528b2d",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "mapdata_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641898565925",
+   "size": 424596,
+   "sha256": "360baefefab6006eb919884099e92d222bf7a7451752cdff17933ac632cf06eb",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "menus_general_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641701899278",
+   "size": 3688045,
+   "sha256": "878410959e65b6842fae437e95edca66dbcebba8e7cdfdf791b582aba9957384",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "objectpoolingconfig_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641678565947",
+   "size": 14760106,
+   "sha256": "e622afeb59d4ed440ae7f97d182f3e52ef90431f44fcaee2f857dbd9102182d9",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "physicmaterials_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642578565857",
+   "size": 5156,
+   "sha256": "5470d81713afd93d4e526c1696533181f48086d90c5ea41e1818adcd5e24afa1",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "prefabs_aicontrollers_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641688565946",
+   "size": 8947206,
+   "sha256": "3f91ce1e5d8e61aae4c46d40f27e2dee59ea54b282e1da58b18eefcc9ad1dd4b",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "prefabs_aipawns_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641848565930",
+   "size": 181164,
+   "sha256": "7d5c5f9c9ab4f5113138052ba334a6a2084800eeb53f614cb7652a32e6f29bb2",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "prefabs_characters_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641135232668",
+   "size": 65639746,
+   "sha256": "0ad3bd00ca4974b839840eb970872b11c79659b782021edd05b8522e1a17764b",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "prefabs_playerpawns_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640758566039",
+   "size": 187386965,
+   "sha256": "5467b879ffa669847075cf5ea803ec018e61eaa7f8337d27cf06df416167e59d",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "prefabs_weapons_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641845232597",
+   "size": 263793,
+   "sha256": "590529ef3744e46e973c40dfcdc4609a797ba1ab24be692deb3607e1114be4bd",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_adm_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641608565954",
+   "size": 25187290,
+   "sha256": "7b609f93aff8bba51c374bcbc9a34eef245129709df9bb91c938caa9543c3621",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_appflow_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641511899297",
+   "size": 34043727,
+   "sha256": "90141f9cc96f6789af52348351d0ae095e4ddcf475ea71b63298c6cbee6f147c",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_aw_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640968566018",
+   "size": 1209418600,
+   "sha256": "9e4948d56125a625ef4047cf06843be1a94bd96e102c4e06ef7eaf669fd07b8b",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_bat_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640188566096",
+   "size": 351700193,
+   "sha256": "513177203fbcfabf7163e14df911ff8f9eefa0a629945f65fdbd90dd9b91bbc8",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_blg_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640945232687",
+   "size": 68303505,
+   "sha256": "e8945d49e34bc6fe22fc939d5670fd2756f3095ab82275d303cfb9f99cd499d0",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_charview_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641941899254",
+   "size": 2702768,
+   "sha256": "e50a66d76cf3154fdfb903cd8b0a6b2b43bcf6330d97edd72bd02f8e4cfc358e",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_gdn_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642551899193",
+   "size": 1692,
+   "sha256": "b3275c2a19e3982a7d6f7cef1d37cd940d8f8648ff2a7a06d96b6bbe19f8f099",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_gdn_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641218565993",
+   "size": 172680069,
+   "sha256": "5acb5d9e3b927936e800194d8e632c29cd29c6cfc55b91e3fa1c61c169329e72",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_gen_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640711899377",
+   "size": 985743136,
+   "sha256": "3d64feb7d74561c0866085c272a88317c2d096a9aee19a773fa28f875a003d6c",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_gtm_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642545232527",
+   "size": 1792,
+   "sha256": "21355a8ed2de9246b704984638706403e4f8c1cb2bd90dac130c9fc5c8662725",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_gtm_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642438565871",
+   "size": 2035146873,
+   "sha256": "a395a9142967011f4b2e2e2d1c0d7430e91932f5d957ca72a566580463324d54",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_gut_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640861899362",
+   "size": 193395487,
+   "sha256": "5d1bbf7541cc4c3be788ff0512777b7014ab4a12fb12f2b3cde07cf6ed081395",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_lfk_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640975232684",
+   "size": 75155179,
+   "sha256": "430226594dcdfa040e36282fb0a9933a8ef8242ca6af9d00a6fd46236359f368",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_max_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642248565890",
+   "size": 4543,
+   "sha256": "91c8e8f6f75db6dd187eb9a632b924d359d687b9d06ca0b65052d08e0ff3ec05",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_max_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544639865232795",
+   "size": 672433828,
+   "sha256": "a25120f29ad1d9d17b39338621d6aa004ec8fc18b16c83fc41ce8e0b07e04a5e",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_row_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642178565897",
+   "size": 3977,
+   "sha256": "d4046b709c61c96700d2725c989e054e7ff5260b9abac4cdccdd0ea359021b2d",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_row_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544639878566127",
+   "size": 672987126,
+   "sha256": "afdf8e0d87304a8b17ae66887635595ec9a7a6038fc822b7014813b5a397fc8d",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_shp_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640555232726",
+   "size": 965123845,
+   "sha256": "598413a410ebdaaa0fd236e1c1dd9b6316705b9374b259fd55d65fd7f6e025d7",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_sim_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544638918566223",
+   "size": 388946727,
+   "sha256": "a51acb2c2796f9a6f1bca39fa50c7d2090d3cd85de8eae304f142489cd162a62",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "scenes_yrd_scenes_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640791899369",
+   "size": 280411100,
+   "sha256": "6722da0a70b71661f24d40848f310a33fa05efe7ec4fce288e88487a89916a9c",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "shaders_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641375232644",
+   "size": 24001062,
+   "sha256": "2049e93fa7421a047f607ad8aacbad409d63b98826ca85bba8996889c05d8410",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "throughlinedatabases_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641965232585",
+   "size": 1408440,
+   "sha256": "62c6d9dd98546afaa084ad57441a84820d96e745d8bf56204ae8f2cc0a9eedcf",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "turn_animation_sets_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642095232572",
+   "size": 332865,
+   "sha256": "3ba9697b4d79e95925e402bf1bc96acd8d7518e4f838ab02aa592df96713347c",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "ui_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544641741899274",
+   "size": 32918373,
+   "sha256": "2fd77be8f3bf4ed9f6d74c1b2e528642a00e017545f4c7de160ae96e9bacd37e",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "uitutorialvideos_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544640675232714",
+   "size": 240175374,
+   "sha256": "201c5d12010b7c2c04676ac27e8883249295711c7378e8ba201770a7ce36bb56",
+   "required": true,
+   "dest": "android-files/obb"
+  },
+  {
+   "name": "walk_animation_sets_assets_all.bundle",
+   "role": "content-bundle",
+   "id": "24544642311899217",
+   "size": 2141,
+   "sha256": "4b3adc18edbcedfd10e36fef2292d2ffe4eaa6c85a0827acca49e85771c930bc",
+   "required": true,
+   "dest": "android-files/obb"
+  }
+ ],
+ "origin": "avp-play recipes/batman.json @ 22c8fe2 (MIT, github.com/myMartek/avp-play)"
+}
+"""#,
+        #"""
+{
+ "schema": 1,
+ "id": "ieytd",
+ "title": "I Expect You To Die",
+ "package": "com.schellgames.ieytdquest",
+ "versionName": "1.2.174682",
+ "versionCode": 74682,
+ "appId": "1987283631365460",
+ "target": "ieytd",
+ "files": [
+  {
+   "name": "IEYTD.apk",
+   "role": "apk",
+   "id": "24653687737631727",
+   "size": 532888801,
+   "sha256": "c85d8ec6e9d99d2f6965b41c2152cfcd3a59b66dca17fc2fcbe9c588fdcb8102",
+   "required": true,
+   "dest": "meta"
+  }
+ ],
+ "origin": "Meta release channel live 518833048593146 (binary 24653687737631727, md5 433a98bb3badc4cc371acfab33a78951), 2026-10-12"
+}
+"""#,
+        #"""
+{
+ "schema": 1,
+ "id": "ktane",
+ "title": "Keep Talking and Nobody Explodes",
+ "package": "com.steelcrategames.keeptalkingandnobodyexplodes",
+ "versionName": "1.10.15",
+ "versionCode": 87,
+ "appId": "2010043642376517",
+ "target": "ktane",
+ "files": [
+  {
+   "name": "KeepTalkingandNobodyExplodes.apk",
+   "role": "apk",
+   "id": "25827385563548991",
+   "size": 150667047,
+   "sha256": "a4484afbc11133ec94850c97b0c18393f7cde332f204dfc7d7e3df3e4c457c6d",
+   "required": true,
+   "dest": "meta"
+  }
+ ],
+ "origin": "Meta release channel live 799274117075141 (binary 25827385563548991, md5 8974109996cbeb9da014407982f2d7d6), 2026-10-12"
 }
 """#,
     ]

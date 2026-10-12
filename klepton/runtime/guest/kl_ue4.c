@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #include "klepton.h"
 #include "kl_jni.h"
@@ -413,6 +415,45 @@ int kl_ue4_configure(const char *libdir, const char *entry_lib, FILE *out) {
     return 0;
 }
 
+
+// Metro Awakening: watch GIsCriticalError. A shipping UE sets it on its fatal
+// path and, here, keeps running; everything after that point is suspect (see
+// kl_guestpatch.c, metro-swappy-off and metro-uobject-free-on-critical). The
+// flag is set by whichever fatal fired, and the log is otherwise silent about
+// it, so this names the moment. Gated on the build: the ldrb that reads the
+// flag in ~UObjectBase must be where it was measured.
+enum { METRO_GISCRITICAL = 0x8982dbc, METRO_UOBJ_LDRB = 0x4c81f60 };
+static void *ue4_critical_watch(void *arg) {
+    volatile uint8_t *flag = (volatile uint8_t *)arg;
+    pthread_setname_np("kl-ue-critical");
+    for (;;) {
+        if (*flag) {
+            fprintf(stderr, "  [ue4] GIsCriticalError was SET — the engine hit a fatal "
+                            "error and is carrying on (libUnreal+0x%x). What follows "
+                            "may be the after-effect, not the cause.\n",
+                    METRO_GISCRITICAL);
+            return NULL;
+        }
+        usleep(200 * 1000);
+    }
+}
+
+static void ue4_watch_critical(kl_image *ue) {
+    const char *t = kl_driver_target_name();
+    if (!ue || !t || strcmp(t, "metro") != 0 || !kl_env_on("KL_UE_CRITICAL_WATCH", 1)) return;
+    uint8_t *base = (uint8_t *)kl_base(ue);
+    if (kl_span(ue) <= METRO_GISCRITICAL) return;
+    uint32_t w = *(const uint32_t *)(base + METRO_UOBJ_LDRB);
+    if (w != 0x39400108u) {
+        fprintf(stderr, "  [ue4] GIsCriticalError watch: not the measured build (0x%x holds "
+                        "0x%08x) — not watching\n", METRO_UOBJ_LDRB, w);
+        return;
+    }
+    pthread_t th;
+    if (pthread_create(&th, NULL, ue4_critical_watch, base + METRO_GISCRITICAL) == 0)
+        pthread_detach(th);
+}
+
 int kl_ue4_load(FILE *out) {
     if (out) {
         fprintf(out, "=== the chain (%zu libraries, dependencies first) ===\n",
@@ -474,6 +515,8 @@ int kl_ue4_load(FILE *out) {
         if (out) { fprintf(out, "  init %s\n", UE4_CHAIN[i]); fflush(out); }
         kl_run_init(img);
     }
+
+    ue4_watch_critical(g_ue4);
 
     // FMOD's Android platform layer — the AudioTrack/OpenSL output and the JavaVM
     // it needs for AudioManager queries — is set up in libfmod's JNI_OnLoad, which
@@ -718,11 +761,13 @@ static void kl_ue4_java_create(FILE *out) {
     // profile's 1 and the engine at "This device does not support Vulkan".
     // In this fork the fix is gated (KL_UE4_OS_RELEASE): it can move a guest's
     // device-profile choice (e.g. the RHI), so the UE4 targets this fork had
-    // before the port (intotheradius, metro, re4, redmatter2, vampire) keep the
-    // old empty answer by default; every other UE4 guest gets the real one.
+    // before the port (intotheradius, re4, redmatter2, vampire) keep the old
+    // empty answer by default; every other UE4 guest gets the real one. metro
+    // NEEDS the real one: on its Steam path the device-profile rules enable
+    // Vulkan only for a parseable Android version (Moss's shape).
     int rel_def = 1;
     {
-        static const char *const k_old[] = { "intotheradius", "metro", "re4", "redmatter2", "vampire" };
+        static const char *const k_old[] = { "intotheradius", "re4", "redmatter2", "vampire" };
         extern const char *kl_driver_target_name(void);
         const char *tn = kl_driver_target_name();
         for (unsigned i = 0; tn && i < sizeof k_old / sizeof *k_old; i++)

@@ -54,3 +54,4 @@ void kl_mediandk_set_video_default(int on);
 // Foveation's live switch is in kl_vulkan.h, already above.
 #import "kl_gpu_time.h"
 #import "kl_openvr.h"
+#import "kl_stream_client.h"

@@ -31,11 +31,44 @@ public enum Toolchain {
                   fix: L("`visionos/mkmvk.sh` en Klepton", "Run `visionos/mkmvk.sh` in Klepton")),
         PathCheck(name: "vendor-fossilize", relativePath: "vendor-fossilize",
                   fix: L("`make fossilize` en Klepton (BUILDING.md)", "Run `make fossilize` in Klepton (BUILDING.md)")),
-        PathCheck(name: "ANGLE (vendor)", relativePath: "vendor/out",
-                  fix: L("Compila ANGLE: `visionos/mkangle.sh` (BUILDING.md)", "Build ANGLE: `visionos/mkangle.sh` (BUILDING.md)")),
+        PathCheck(name: "ANGLE (vendor)", relativePath: "vendor/out/xros",
+                  fix: L("Compila ANGLE: `make angle-xros angle-xrsim` en Klepton (~14–20 GB, BUILDING.md)",
+                         "Build ANGLE: `make angle-xros angle-xrsim` in Klepton (~14–20 GB, BUILDING.md)")),
         PathCheck(name: "ANGLE.xcframework", relativePath: "visionos/Frameworks/ANGLE_libGLESv2.xcframework",
-                  fix: L("`visionos/mkangle.sh` en Klepton", "Run `visionos/mkangle.sh` in Klepton")),
+                  fix: L("Lo crea la primera compilación del hub (`visionos/mkangle.sh`), con ANGLE ya compilado",
+                         "Made by the first hub build (`visionos/mkangle.sh`) once ANGLE is built")),
     ]
+
+    /// Whether a hub bundle id is unusable for a device build: empty, or one of the examples the
+    /// docs and the placeholder row use (com.example.*, com.yourname.*). Nobody can sign for those,
+    /// and the game data lives in the id's container, so it must be the user's own from the start.
+    public static func isPlaceholderBundleID(_ id: String) -> Bool {
+        let t = id.trimmingCharacters(in: .whitespaces).lowercased()
+        return t.isEmpty || t.hasPrefix("com.example.") || t.hasPrefix("com.yourname.")
+    }
+
+    /// One game of the hub row and whether this Mac has what building it in needs
+    /// (`python3 visionos/targets.py --hub-check hub`).
+    public struct HubGameInput: Equatable, Sendable {
+        public enum State: String, Sendable { case ok, missing, skip }
+        public let game: String
+        public let display: String
+        public let state: State
+        /// What is missing (empty when ok).
+        public let missing: String
+        /// How to get it (empty when ok).
+        public let hint: String
+    }
+
+    /// Parses `targets.py --hub-check` lines: game, display, ok|missing|skip, what is missing, how to get it.
+    public static func parseHubCheck(_ output: String) -> [HubGameInput] {
+        output.split(whereSeparator: \.isNewline).compactMap { line in
+            let f = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 3, let state = HubGameInput.State(rawValue: f[2]) else { return nil }
+            return HubGameInput(game: f[0], display: f[1], state: state,
+                                missing: f.count > 3 ? f[3] : "", hint: f.count > 4 ? f[4] : "")
+        }
+    }
 
     /// First defaults for Settings, from the environment the build scripts already use.
     public static func environmentDefaults(_ env: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {

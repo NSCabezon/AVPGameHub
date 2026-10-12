@@ -105,6 +105,115 @@ final class RecipeTests: XCTestCase {
         r = good; r.files[1].dest = "meta"; r.files[1].name = "game.apk"; r.files[1].role = "asset"
         XCTAssertThrowsError(try r.validate(), "duplicate path")
     }
+
+    func testBatmanRecipe() throws {
+        let b = try XCTUnwrap(Recipes.recipe(id: "batman"))
+        XCTAssertNoThrow(try b.validate())
+        XCTAssertEqual(b.target, "batman")
+        XCTAssertEqual(b.package, "com.camouflaj.manta")
+        XCTAssertEqual(b.versionCode, 350961)
+        XCTAssertEqual(b.files.filter { $0.role == "apk" }.count, 1)
+        XCTAssertEqual(b.apk?.dest, "meta")
+        XCTAssertNil(b.apk?.localName)
+        XCTAssertEqual(b.apk?.relativePath, "meta/Manta_ReleaseMaster_CL423077_379.apk")
+        // avp-play's 91 files; the 6 packs it lists by id only were measured from Meta (2026-10-12).
+        XCTAssertEqual(b.files.count, 91)
+        XCTAssertEqual(b.files.filter(\.required).count, 83)
+        XCTAssertEqual(b.files.filter(\.required).reduce(Int64(0)) { $0 + ($1.size ?? 0) }, 18_263_125_462)
+        XCTAssertEqual(b.files.compactMap(\.locale).sorted(),
+                       ["de-DE", "en-US", "es-419", "es-ES", "fr-FR", "it-IT", "ja-JP", "ko-KR"])
+        // Every pack at the size the game's own localized-asset-manifest.txt gives it.
+        let manifest: [String: Int64] = [
+            "de-DE": 1_448_858_236, "en-US": 1_249_987_099, "es-419": 1_407_048_947, "es-ES": 1_343_813_242,
+            "fr-FR": 1_257_389_086, "it-IT": 1_418_577_351, "ja-JP": 1_391_060_721, "ko-KR": 1_272_413_266,
+        ]
+        for f in b.files where f.locale != nil {
+            XCTAssertEqual(f.size, manifest[f.locale!], f.name)
+            XCTAssertEqual(f.name, "Audio_\(f.locale!).obb")
+        }
+        XCTAssertTrue(b.files.filter { $0.locale != nil }.allSatisfy { !$0.required && $0.sha256 != nil && $0.size != nil })
+        XCTAssertTrue(b.files.filter { $0.role != "apk" }.allSatisfy { $0.dest == "android-files/obb" })
+    }
+
+    func testBatmanLanguagePacksAreOptIn() throws {
+        let b = try XCTUnwrap(Recipes.recipe(id: "batman"))
+        let base = FetchPlan.wantedFiles(recipe: b, selection: FetchSelection())
+        XCTAssertEqual(base.count, 83)
+        XCTAssertTrue(base.allSatisfy { $0.locale == nil })
+        let en = FetchPlan.wantedFiles(recipe: b, selection: FetchSelection(locales: ["en-US"]))
+        XCTAssertEqual(en.count, 84)
+        XCTAssertEqual(en.filter { $0.locale != nil }.map(\.name), ["Audio_en-US.obb"])
+        XCTAssertEqual(FetchPlan.wantedFiles(recipe: b, selection: FetchSelection(locales: ["xx-XX"])).count, 83)
+        let enID = try XCTUnwrap(en.first { $0.locale == "en-US" }).id
+        XCTAssertEqual(FetchPlan.wantedFiles(recipe: b, selection: FetchSelection(withheld: [enID], locales: ["en-US"])).count, 83)
+    }
+
+    func testDefaultVoiceLocales() throws {
+        let b = try XCTUnwrap(Recipes.recipe(id: "batman"))
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["es-ES"]), ["es-ES", "en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["es_ES"]), ["es-ES", "en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["es"]), ["es-ES", "en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["es-MX"]), ["es-419", "en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["es-419"]), ["es-419", "en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["fr-CA"]), ["fr-FR", "en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["en-GB"]), ["en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["ja-JP"]), ["ja-JP", "en-US"])
+        // No pack in the first language: the next preferred one that has one.
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["pt-BR", "es-ES"]), ["es-ES", "en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: ["zh-Hans-CN"]), ["en-US"])
+        XCTAssertEqual(b.defaultVoiceLocales(preferred: []), ["en-US"])
+        let i = try XCTUnwrap(Recipes.recipe(id: "ieytd"))
+        XCTAssertEqual(i.defaultVoiceLocales(preferred: ["es-ES"]), [])
+        // The selection plans exactly those packs.
+        let wanted = FetchPlan.wantedFiles(recipe: b, selection: FetchSelection(locales: b.defaultVoiceLocales(preferred: ["es-ES"])))
+        XCTAssertEqual(wanted.compactMap(\.locale).sorted(), ["en-US", "es-ES"])
+        XCTAssertEqual(b.files(locales: ["es-ES"]).count, 84)
+    }
+
+    func testIEYTDRecipe() throws {
+        let r = try XCTUnwrap(Recipes.recipe(id: "ieytd"))
+        XCTAssertNoThrow(try r.validate())
+        XCTAssertEqual(r.target, "ieytd")
+        XCTAssertEqual(r.appId, "1987283631365460")
+        XCTAssertEqual(r.package, "com.schellgames.ieytdquest")
+        XCTAssertEqual(r.versionCode, 74682)
+        // APK only: no OBB, no add-ons, no language packs.
+        XCTAssertEqual(r.files.count, 1)
+        XCTAssertNil(r.addons)
+        XCTAssertEqual(r.apk?.dest, "meta")
+        XCTAssertEqual(r.apk?.relativePath, "meta/IEYTD.apk")
+        XCTAssertEqual(r.apk?.size, 532_888_801)
+        XCTAssertEqual(r.apk?.sha256, "c85d8ec6e9d99d2f6965b41c2152cfcd3a59b66dca17fc2fcbe9c588fdcb8102")
+        XCTAssertEqual(FetchPlan.wantedFiles(recipe: r, selection: FetchSelection()).map(\.name), ["IEYTD.apk"])
+    }
+
+    func testKTANERecipe() throws {
+        let r = try XCTUnwrap(Recipes.recipe(id: "ktane"))
+        XCTAssertNoThrow(try r.validate())
+        XCTAssertEqual(r.target, "ktane")
+        XCTAssertEqual(r.appId, "2010043642376517")
+        XCTAssertEqual(r.package, "com.steelcrategames.keeptalkingandnobodyexplodes")
+        XCTAssertEqual(r.versionCode, 87)
+        // APK only: no OBB, no add-ons, no language packs.
+        XCTAssertEqual(r.files.count, 1)
+        XCTAssertNil(r.addons)
+        XCTAssertEqual(r.apk?.relativePath, "meta/KeepTalkingandNobodyExplodes.apk")
+        XCTAssertEqual(r.apk?.size, 150_667_047)
+        XCTAssertEqual(r.apk?.sha256, "a4484afbc11133ec94850c97b0c18393f7cde332f204dfc7d7e3df3e4c457c6d")
+        XCTAssertEqual(FetchPlan.wantedFiles(recipe: r, selection: FetchSelection()).map(\.name), ["KeepTalkingandNobodyExplodes.apk"])
+    }
+
+    func testLanguagePackValidation() throws {
+        var r = try XCTUnwrap(Recipes.recipe(id: "batman"))
+        let i = try XCTUnwrap(r.files.firstIndex { $0.locale == "en-US" })
+        let good = r
+        r.files[i].required = true
+        XCTAssertThrowsError(try r.validate(), "language pack must be optional")
+        r = good; r.files[i].sha256 = nil
+        XCTAssertThrowsError(try r.validate(), "language pack needs sha256")
+        r = good; r.files[i].size = nil
+        XCTAssertThrowsError(try r.validate(), "language pack needs size")
+    }
 }
 
 final class ClientTests: XCTestCase {
@@ -237,6 +346,31 @@ final class FetchTests: XCTestCase {
         XCTAssertFalse(store.isComplete(newer))
         XCTAssertEqual(FetchPlan.plan(recipe: newer, selection: FetchSelection(), record: store.loadRecord(), state: store.state(of:)).map(\.action),
                        [.download, .download])
+    }
+
+    func testCompletenessCountsTheChosenVoicePacks() async throws {
+        var r = makeRecipe(apk: apk, obb: obb)
+        r.addons = nil
+        let voice = Data("hola".utf8)
+        r.files.append(RecipeFile(name: "Audio_es-ES.obb", role: "audio-locale", id: "555", size: Int64(voice.count),
+                                  sha256: sha(voice), required: false, dest: "android-files/obb", locale: "es-ES"))
+        XCTAssertNoThrow(try r.validate())
+        let t = MockTransport(cdn(["111": apk, "222": obb, "555": voice]))
+        let store = GameStore(root: tempDir())
+        let client = MetaClient(token: token, transport: t)
+        // An install from before the packs: the base game only.
+        let base = FetchPlan.plan(recipe: r, selection: FetchSelection(), record: nil, state: store.state(of:))
+        _ = try await Fetcher(client: client, store: store, gate: fastGate).run(base, recipe: r)
+        XCTAssertTrue(store.isComplete(r))
+        XCTAssertFalse(store.isComplete(r, locales: ["es-ES"]), "the Spanish pack is not there yet")
+        let p = store.requiredProgress(r, locales: ["es-ES"])
+        XCTAssertEqual(p.total - p.have, Int64(voice.count))
+        // Asking again with the pack: only the pack is fetched.
+        let more = FetchPlan.plan(recipe: r, selection: FetchSelection(locales: ["es-ES"]), record: store.loadRecord(), state: store.state(of:))
+        XCTAssertEqual(more.map(\.action), [.keep, .keep, .download])
+        _ = try await Fetcher(client: client, store: store, gate: fastGate).run(more, recipe: r)
+        XCTAssertTrue(store.isComplete(r, locales: ["es-ES"]))
+        XCTAssertEqual(try Data(contentsOf: store.root.appendingPathComponent("android-files/obb/Audio_es-ES.obb")), voice)
     }
 
     func testChecksumMismatchStopsAtFirstFile() async throws {

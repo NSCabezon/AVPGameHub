@@ -34,13 +34,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import targets as targets_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Quiet about hub games left out for missing files: run.sh already said which, and why.
+os.environ.setdefault("KL_HUB_QUIET", "1")
 KLT = targets_mod.resolve(os.environ.get("KLEPTON_TARGET") or targets_mod.DEFAULT)
 # The PRODUCT name, which is also the .xcodeproj's, the .app's and the scheme's.
 # The Swift sources are still Klepton*.swift whatever the product is called —
 # they are the app layer, shared by every target, and renaming them per build
 # would be five file copies to say one thing.
 NAME = KLT["product"]
-BUNDLE_ID = os.environ.get("KLEPTON_BUNDLE_ID", KLT["bundle"])
+# `or`, not a default: a config file may set KLEPTON_BUNDLE_ID to "" (an empty
+# PRODUCT_BUNDLE_IDENTIFIER makes the pbxproj unreadable), like the shells' ${…:-…}.
+BUNDLE_ID = os.environ.get("KLEPTON_BUNDLE_ID") or KLT["bundle"]
 
 # Klepton.entitlements — the two memory capabilities (see that file for what
 # they buy and why this app wants them). **On by default: they fixed the
@@ -88,7 +92,7 @@ ENTITLEMENTS = os.environ.get("KLEPTON_ENTITLEMENTS", "1") != "0"
 # files that have to agree is exactly how they stop agreeing. The authored file
 # is the union; the knob FILTERS a generated copy.
 #
-#   com.apple.developer.low-latency-streaming (KLEPTON_LOW_LATENCY=0 drops it)
+#   com.apple.developer.low-latency-streaming (off unless KLEPTON_LOW_LATENCY=1)
 #       Added at the user's request while chasing a streaming regression. Note
 #       honestly what is and is not known about it: this key does not appear in
 #       the XROS SDK or in Xcode's Library tree — but neither do the two memory
@@ -104,8 +108,12 @@ OPTIONAL_ENTITLEMENTS = {
     "com.apple.developer.low-latency-streaming": "KLEPTON_LOW_LATENCY",
 }
 ENTITLEMENTS_FILE = "Klepton.entitlements"
+# What an unset knob means: OFF in AVP Game Hub. The key is unverified and not
+# self-service, and a team that was never granted it fails signing outright (taking
+# the memory keys with it). KLEPTON_LOW_LATENCY=1 (local/config.env) attaches it.
+OPTIONAL_ENTITLEMENTS_DEFAULT = "0"
 _dropped = [k for k, env in OPTIONAL_ENTITLEMENTS.items()
-            if os.environ.get(env, "1") == "0"]
+            if (os.environ.get(env) or OPTIONAL_ENTITLEMENTS_DEFAULT) == "0"]
 if ENTITLEMENTS and _dropped:
     import plistlib
     src = pathlib.Path(__file__).with_name("Klepton.entitlements")
@@ -128,8 +136,14 @@ ENTITLEMENTS_SETTING = (f"\t\t\t\tCODE_SIGN_ENTITLEMENTS = {ENTITLEMENTS_FILE};\
 # KLEPTON_HUB_NO_GUESTS=1 leaves the games' frameworks out — a UI-only build
 # (the library, for the simulator, where the device-only translations have no
 # slice). Such an app can show the library and cannot boot a game.
+#
+# A hub game whose inputs are not on this Mac (or that KLEPTON_HUB_GAMES leaves
+# out) is not embedded either: targets.py hub_games() is the list this build
+# carries, the same one run.sh translated; HUB_ALL is every game the row lists,
+# which the library shows (the left-out ones as "not in this build").
 IS_HUB = KLT["kind"] == "hub"
-HUB_GAMES = targets_mod.hub_games(KLT["name"]) if IS_HUB else []
+HUB_ALL = targets_mod.hub_games_all(KLT["name"]) if IS_HUB else []
+HUB_GAMES = targets_mod.hub_games(KLT["name"], quiet=True) if IS_HUB else []
 HUB_NO_GUESTS = IS_HUB and os.environ.get("KLEPTON_HUB_NO_GUESTS", "") not in ("", "0")
 # [(game, libs)] — one entry, the target itself, for a single-target build.
 if IS_HUB:
@@ -140,7 +154,8 @@ else:
 GUEST = [l for _, libs in GUEST_SETS for l in libs]
 # The runtime's compile-time default: the target itself, or a hub's first game
 # (the library sets KL_TARGET to the one the player picks before configuring).
-TARGET_DEFAULT = HUB_GAMES[0] if IS_HUB else KLT["name"]
+# A hub carrying no game still needs a name here; nothing boots it.
+TARGET_DEFAULT = (HUB_GAMES or HUB_ALL)[0] if IS_HUB else KLT["name"]
 ANGLE = ["ANGLE_libEGL", "ANGLE_libGLESv2"]
 # ...and the OTHER renderer, for a guest whose graphics API is Vulkan (BONELAB).
 # Same treatment as ANGLE for the same reasons: one driver for every guest that
@@ -272,7 +287,7 @@ USAGE_DESCRIPTIONS = {
     "NSHandsTrackingUsageDescription": "Klepton maps your hands onto the guest's two Touch controllers.",
     "NSAccessoryTrackingUsageDescription": "Klepton maps PSVR2 Sense controllers onto the guest's two Touch controllers.",
     "NSBluetoothAlwaysUsageDescription": "Klepton connects to spatial controllers that are not visible to the system as standard game controllers.",
-    "NSLocalNetworkUsageDescription": "Steam Link finds the PCs on your network by broadcasting to them, and streams from the one you pair with.",
+    "NSLocalNetworkUsageDescription": "Finds the Mac that streams your game to the headset (Play from Mac), and the PCs Steam Link streams from.",
 }
 _usage_settings = "".join(
     '\t\t\t\tINFOPLIST_KEY_%s = "%s";\n' % (k, v.replace("\\", "\\\\").replace('"', '\\"'))
@@ -307,7 +322,8 @@ for _stack in (_icon_base, f"{_icon_base}-launcher"):
 SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift",
-         "KleptonLauncher.swift", "KleptonHL1.swift", "KleptonHUD.swift"]
+         "KleptonLauncher.swift", "KleptonHL1.swift", "KleptonHUD.swift",
+         "KleptonStreamClient.swift"]
 swift = [{"name": s, "ref": oid(f"FS{i}"), "bld": oid(f"BS{i}")} for i, s in enumerate(SWIFT)]
 
 # The alyx build downloads its own game content from Steam (Sources/KleptonSteamContent.swift)
@@ -397,17 +413,26 @@ def hub_meta(t):
 
 def hub_manifest():
     rows = []
-    for g in HUB_GAMES:
+    for g in HUB_ALL:
         t = targets_mod.TARGETS[g]
         rows.append('    KLHubGameRow(target: "%s", display: "%s", kind: "%s", entry: "%s", bundled: %s,\n'
-                    '                 tree: "%s", apk: "%s", meta: %s),'
+                    '                 tree: "%s", apk: "%s", renderScale: %.2f, foveation: %s, glFoveation: %s, meta: %s),'
                     % (g, t["display"].replace('"', '\\"'), t["kind"], t["entry"],
-                       "false" if HUB_NO_GUESTS else "true", t["tree"], t["apk"], hub_meta(t)))
+                       "true" if g in HUB_GAMES and not HUB_NO_GUESTS else "false", t["tree"], t["apk"],
+                       # The game's own render-scale and foveation defaults
+                       # (targets.py "render_scale" / "foveation"); the hub bakes
+                       # neutral Info.plist values.
+                       float(t.get("render_scale", 1.0)),
+                       "true" if t.get("foveation", True) else "false",
+                       # "gl_foveation": False for a Vulkan guest (no GL rate map).
+                       "true" if t.get("gl_foveation", True) else "false", hub_meta(t)))
     return ("// GENERATED by visionos/gen_xcodeproj.py from visionos/targets.py (hub \"%s\")"
             " - do not edit.\n// Add a game to the hub's \"games\" list in targets.py and regenerate.\n"
             "let klHubGameRows: [KLHubGameRow] = [\n%s\n]\n"
+            "/// A UI-only build (KLEPTON_HUB_NO_GUESTS): no game is bundled, by choice.\n"
+            "let klHubNoGuests = %s\n"
             "/// The checkout this build came from (KleptonSessionStats' build stamp).\n"
-            "let klHubBuildCommit = \"%s\"\n" % (KLT["name"], "\n".join(rows), git_commit()))
+            "let klHubBuildCommit = \"%s\"\n" % (KLT["name"], "\n".join(rows), "true" if HUB_NO_GUESTS else "false", git_commit()))
 
 def git_commit():
     import subprocess
@@ -578,7 +603,7 @@ COMMON = f"""
 				CLANG_ENABLE_MODULES = YES;
 {ENTITLEMENTS_SETTING}				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = {APP_BUILD};
-				DEVELOPMENT_TEAM = {TEAM};
+				DEVELOPMENT_TEAM = "{TEAM}";
 				ENABLE_PREVIEWS = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 {ASSETCATALOG_SETTING}				INFOPLIST_FILE = {INFOPLIST_PATH};
@@ -603,9 +628,11 @@ COMMON = f"""
 					"$(SRCROOT)/../runtime/libc",
 					"$(SRCROOT)/../runtime/gfx",
 					"$(SRCROOT)/../runtime/xr",
+					"$(SRCROOT)/../runtime/net",
 					"$(SRCROOT)/../runtime/media",
 					"$(SRCROOT)/../runtime/guest",
 					"$(SRCROOT)/../runtime/diag",
+					"$(SRCROOT)/../runtime/net",
 					"$(inherited)",
 				);
 				// Two levels of escaping, and the first attempt had one. The
@@ -644,7 +671,7 @@ COMMON = f"""
 				// -lc++: Fossilize (kl_fossilize.cpp) rides in the runtime archive
 				// when vendored (make fossilize); harmless when it does not.
 				OTHER_LDFLAGS = "-lz -lc++ -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface";
-				PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID};
+				PRODUCT_BUNDLE_IDENTIFIER = "{BUNDLE_ID}";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = xros;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
@@ -890,6 +917,13 @@ PBX = f"""// !$*UTF8*$!
 
 
 def main():
+    # A device build cannot sign without a team, and Xcode's own error for that is a
+    # page of provisioning noise; say what to do instead (run.sh sets KL_REQUIRE_TEAM
+    # for device builds; the simulator signs ad hoc and needs none).
+    if not TEAM and os.environ.get("KL_REQUIRE_TEAM", "") not in ("", "0"):
+        print("!! no signing team: sign in under Xcode › Settings › Accounts (creates the Apple "
+              "Development certificate) or set KLEPTON_TEAM", file=sys.stderr)
+        return 1
     for g, d, how in [(l, guest_dir(game) if IS_HUB else GUEST_DIR,
                        f"KLEPTON_TARGET={game} visionos/mkguest.sh")
                       for game, libs in GUEST_SETS for l in libs] + \
@@ -932,6 +966,9 @@ def main():
         for game, libs in GUEST_SETS:
             print(f"  hub game {game:<14} -> Frameworks/{game}/: "
                   + (f"{len(libs)} frameworks" if libs else "(none - KLEPTON_HUB_NO_GUESTS)"))
+        for game in HUB_ALL:
+            if game not in HUB_GAMES:
+                print(f"  hub game {game:<14} -> not in this build (listed, cannot be played)")
     else:
         print(f"  embedded guest frameworks: {', '.join(GUEST)}")
     print(f"  embedded ANGLE:            {', '.join(ANGLE)}")

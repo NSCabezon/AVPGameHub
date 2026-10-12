@@ -8,7 +8,8 @@
 #define KL_OPENVR_H
 void *kl_openvr_lookup(const char *name);
 // WaitGetPoses blocks in `wait` before latching the frame's poses (the frame
-// pacer, KL_GUEST_PACE_HZ / KL_GUEST_PACE_DIV). NULL, the default, never waits.
+// pacer: KL_GUEST_PACE_HZ / KL_GUEST_PACE_DIV on visionOS, KL_STREAM_LOCK_FPS in the
+// Mac stream host). NULL, the default, never waits.
 void kl_openvr_set_frame_pacer(void (*wait)(void));
 // Run a console command in the running game (Half-Life: Alyx build 10919
 // only), on the game's own thread at its next input update — the same engine

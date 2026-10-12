@@ -507,6 +507,100 @@ static const kl_gp_word k_alyx_startup_nopause[] = {
     { 0xf81be0, 0x5400050d, 0x14000028, "b.le 0xf81c80 -> b 0xf81c80 (skip the startup-pause countdown)" },
 };
 
+// Metro Awakening (Steam Frame build 944116, libUnreal.so, UE 5.2) — Vertigo's
+// "FireAnt" VR loading screen draws on its own thread ("LoadingScreen") from a
+// snapshot of FOpenXRHMD's rendering frame state, taken when a map load starts
+// (the copy at 0x3c42028 reads PipelinedFrameStateRendering, HMD+0x830). The
+// draw (0x3c40104) then dereferences the snapshot's TrackingSpace
+// (this+0x178) without a check. On the Steam path the first map load starts
+// before the render thread has transferred any frame state — Steam init answers
+// synchronously, where the Meta path waits on an async entitlement and renders
+// frames first — so the snapshot holds a null TrackingSpace and the thread
+// faults on its first draw (`ldr x22, [x8, #0x18]`, x8 = 0). Measured with
+// watchpoints on both identities: with Meta the field is set by the render
+// thread (0x3c2c7b4) before the copy, with Valve it is still null.
+//
+// The patch makes that draw return when the snapshot has no tracking space:
+// the loading screen skips its frame and draws once a later snapshot (the next
+// map load) has one. Three words, reordered so nothing is lost:
+//   0x3c40150  ldr x22, [x8, #0x18]   -> ldr x20, [x20, #0xaa0]  (moved up)
+//   0x3c40154  ldr x20, [x20, #0xaa0] -> cbz x8, 0x3c41544        (the epilogue:
+//              stack-guard check + register restore; [sp,#0x10] and
+//              [x29,#-0x50] are already written at this point)
+//   0x3c40158  cbz x22, 0x3c401a8     -> ldr x22, [x8, #0x18]
+// The dropped `cbz x22` only skipped refcount increments for a null pointer the
+// code dereferences unconditionally further down (0x3c40268), so the non-null
+// path is unchanged.
+static const kl_gp_word k_metro_fireant_nullspace[] = {
+    { 0x3c40150, 0xf9400d16, 0xf9455294, "ldr x20, [x20, #0xaa0]" },
+    { 0x3c40154, 0xf9455294, 0xb4009f88, "cbz x8, 0x3c41544 (no tracking space: skip this draw)" },
+    { 0x3c40158, 0xb4000296, 0xf9400d16, "ldr x22, [x8, #0x18]" },
+};
+
+// Metro Awakening — the window present goes through Swappy, Swappy cannot init,
+// and the engine's answer to that is a fatal error it then survives.
+//
+// On the Steam path the OpenXR HMD does not claim a standalone stereo-only
+// device, so the RHI thread presents the Android window swapchain every frame.
+// a.UseSwappyForFramePacing is on (registered with default 1, 0x4cc7768), so
+// FVulkanAndroidPlatform::Present (0x4868314) hands it to SwappyVk_queuePresent
+// (0x77ebbf0). Swappy's own init never completes here (no Choreographer /
+// Display JNI is reached), so its per-swapchain implementation is disabled
+// (SwappyCommon+0x359 == 0) and doQueuePresent answers
+// VK_ERROR_INITIALIZATION_FAILED (-3, 0x77efa5c). FVulkanSwapChain::Present
+// (0x48bf380..) accepts only SUCCESS / SUBOPTIMAL / OUT_OF_DATE / SURFACE_LOST,
+// so -3 goes to VERIFYVULKANRESULT ("PresentResult", VulkanSwapChain.cpp) and
+// the shipping fatal path sets GIsCriticalError = 1 on the RHI thread
+// (0x48da22c, measured with a watchpoint) — and the process keeps running.
+//
+// That flag is what corrupted everything after it: ~UObjectBase (0x4c81f20)
+// skips GUObjectArray.FreeUObjectIndex while GIsCriticalError is set, so every
+// object the first GC destroys (on FAsyncPurge) leaves its array slot pointing
+// at freed memory. Measured on GUObjectArray index 26592: created by
+// FAsyncLoading, BeginDestroy/FinishDestroy on the game thread, destroyed and
+// freed on FAsyncPurge, slot never cleared, block reused and freed again by the
+// loader — then VGLoadingFacade's TObjectIterator (0x3d49b7c) reads it and
+// faults (libUnreal+0x4c753a0 / +0x3d49ce0), or the render thread reaches a
+// dead UMaterial through FMaterialRenderProxy's deferred uniform-expression set
+// (pc 0x1 from 0x6b8b0e8, or 0x6bacbe4). Same root, different victims.
+//
+// So Swappy is switched off where it is registered: a.UseSwappyForFramePacing's
+// default (0x4cc7778) goes from 1 to 0, and every reader of it (present, queue
+// registration, swapchain create/destroy, the pacer) takes its non-Swappy path.
+// Patching only the present (0x486832c) was tried first and is not enough: the
+// swapchain recreate then calls into the half-initialised Swappy
+// (SwappyVk_destroySwapchain, 0x77ebe44 -> 0x77e263c, null JNI object) and
+// faults on the render thread. With Swappy off, UE paces with
+// VK_GOOGLE_display_timing, which kl_vulkan.c now answers for our synthetic
+// swapchain. The words either side of the immediate are checked, not changed.
+static const kl_gp_word k_metro_noswappy[] = {
+    { 0x4cc7770, 0x91206021, 0x91206021, "add x1, x1, #0x818 (L\"a.UseSwappyForFramePacing\"; unchanged)" },
+    { 0x4cc7778, 0x52800022, 0x52800002, "mov w2, #1 -> mov w2, #0 (registered default: off)" },
+    { 0x4cc7780, 0x2a1f03e4, 0x2a1f03e4, "mov w4, wzr (flags; unchanged)" },
+};
+
+// Metro Awakening — the same survived-fatal corruption as metro-swappy-off,
+// from whatever fatal fires next. Headset crash 2026-10-12 11:03 (in play, ~1.5
+// min after launch): the GC's purge loop (0x4bac9f0..) called
+// UObject::ConditionalBeginDestroy (0x4bf29e8: flags |= RF_BeginDestroyed,
+// then vtable+0xb8) on an object whose memory RealityKit had since reused —
+// its "vtable" was CoreRE text, so the indirect call landed on two instruction
+// words (pc 0xf90033e8ca080128, "Invalid Page"). That is a slot left pointing
+// at freed memory, which is exactly what ~UObjectBase does once GIsCriticalError
+// (0x8982dbc) is set: it skips GUObjectArray.FreeUObjectIndex. A shipping UE
+// sets the flag on its fatal path and, here, carries on running.
+//
+// The skip exists so a CRASHING engine does not touch the object array; this
+// process does not crash, so the slot is freed as it would be on any normal
+// run. One word: the `cbnz w8` on *GIsCriticalError becomes a nop; the
+// UObjectInitialized and ClassPrivate checks either side are unchanged.
+// kl_ue4.c also watches the flag and names the moment it is set.
+static const kl_gp_word k_metro_uobject_free[] = {
+    { 0x4c81f60, 0x39400108, 0x39400108, "ldrb w8, [x8] (*GIsCriticalError; unchanged)" },
+    { 0x4c81f64, 0x350005c8, 0xd503201f, "cbnz w8, skip-free -> nop (free the slot anyway)" },
+    { 0x4c81f68, 0xb001d955, 0xb001d955, "adrp x21, GUObjectArray (unchanged)" },
+};
+
 static const kl_gp_patch k_patches[] = {
     { "alyx-lua-arena-anywhere", "libvscript.so",
       "the Lua VM arena may live above 2 GB (ARM64 LuaJIT is GC64)",
@@ -538,6 +632,16 @@ static const kl_gp_patch k_patches[] = {
     // { "hl2-matqueue-allow", "libmaterialsystem.so",
     //   "force HL2Q3 Queued Material System allow=1 so VR render targets get created",
     //   k_hl2_matqueue_allow, sizeof k_hl2_matqueue_allow / sizeof *k_hl2_matqueue_allow },
+
+    { "metro-fireant-null-trackingspace", "libUnreal.so",
+      "the FireAnt loading screen skips a draw whose frame-state snapshot has no tracking space",
+      k_metro_fireant_nullspace, sizeof k_metro_fireant_nullspace / sizeof *k_metro_fireant_nullspace },
+    { "metro-swappy-off", "libUnreal.so",
+      "a.UseSwappyForFramePacing defaults to 0 (Swappy cannot init here; its present error was a fatal that set GIsCriticalError)",
+      k_metro_noswappy, sizeof k_metro_noswappy / sizeof *k_metro_noswappy },
+    { "metro-uobject-free-on-critical", "libUnreal.so",
+      "~UObjectBase frees its GUObjectArray slot even after a survived fatal (GIsCriticalError)",
+      k_metro_uobject_free, sizeof k_metro_uobject_free / sizeof *k_metro_uobject_free },
 
     { "wrath2-force-vulkan-available", "libUE4.so",
       "FAndroidMisc::IsVulkanAvailable() always returns true (the RHI gate)",

@@ -31,7 +31,7 @@ final class FrameScanTests: XCTestCase {
 
     func testMetroAndroidAPKIsUnrealFromLaunchName() throws {
         let c = try XCTUnwrap(FrameScan.detect(appID: 2669410, appInfo: try kv(FrameFixtures.metro)))
-        XCTAssertEqual(c.support, .none)
+        XCTAssertEqual(c.support, .hub) // in the hub's catalog since the metro port
         XCTAssertNil(c.frameRuntime) // no steam_frame_compatibility block
         XCTAssertEqual(c.depots.map(\.depotID), [2669412]) // windows depot, shared redist and DLC skipped
         XCTAssertEqual(c.depots[0].kind, .android)

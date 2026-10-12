@@ -22,7 +22,10 @@
 //     does mid-game), foveated rendering (live through the foveating MoltenVK's
 //     klMVKFoveationSetEnabled when the game BOOTED foveating, else "next
 //     launch") and render scale 80/90/100 % (next launch: the eye targets are
-//     sized at boot), then "Cerrar"/"Close", which closes it like ○ (trigger,
+//     sized at boot). Every other game: antialiasing is n/a, and foveation
+//     (KL_VRR's rate map) and render resolution 50–100 % (KL_OVRP_RENDER_SCALE)
+//     are saved per game (KLRenderPrefs) for the next launch — both are fixed at
+//     boot. Then "Cerrar"/"Close", which closes it like ○ (trigger,
 //     ✕ or right pinch on it). Every change is saved to the game's settings
 //     (KLGameSettingsStore) so the next launch keeps it.
 //     INPUT. While the menu is open the PSVR2 Sense input never reaches the
@@ -67,6 +70,10 @@ final class KLQuickSettings: @unchecked Sendable {
     private var msaaNow = 2
     private var foveateNow = false
     private var renderScaleBoot: Float = 1
+    // Every other game: what KleptonRendering.apply handed the runtime at boot
+    // (the per-game choice, or KL_VRR / KL_OVRP_RENDER_SCALE when set).
+    private var gfxFoveationBoot = true
+    private var gfxScaleBoot = 1.0
     // Input edge state, render thread only.
     private var raw: [KleptonHandState] = [KleptonHandState(), KleptonHandState()]
     private var prevButtons: [UInt32] = [0, 0]
@@ -100,6 +107,10 @@ final class KLQuickSettings: @unchecked Sendable {
         msaaNow = Int(env["KL_ALYX_MSAA"] ?? "") == 4 ? 4 : 2
         foveateNow = klEnvOn("KL_FOVEATE", default: false)
         renderScaleBoot = Float(env["KL_OPENVR_RT_SCALE"] ?? "") ?? KLGameSettingsStore.defaultRenderScale
+        let t = target
+        gfxFoveationBoot = klEnvOn("KL_VRR", default: KLRenderPrefs.foveation(for: t))
+        let envScale = Double(env["KL_OVRP_RENDER_SCALE"] ?? "").flatMap { (0.4...1.0).contains($0) ? $0 : nil }
+        gfxScaleBoot = envScale ?? KLRenderPrefs.renderScale(for: t)
         let on = hudOn
         lock.unlock()
         NSLog("[qs] game running (\(target)); performance overlay \(on ? "ON" : "off") (KL_HUD / setting)")
@@ -168,13 +179,26 @@ final class KLQuickSettings: @unchecked Sendable {
                                                      "Antialiasing \(m)× guardado; se aplicará la próxima vez que arranque el juego."))
     }
 
-    /// Foveated rendering on/off: live when the game booted foveating.
+    /// Foveated rendering on/off: live when the game booted foveating (Alyx);
+    /// every other game, saved per game for the next launch.
     @discardableResult
     func setFoveation(_ on: Bool) -> Reply {
         guard gameRunning else { return notRunning() }
         guard isAlyx else {
-            return Reply(outcome: .notSupported, text: klL("Foveated rendering is only available in Half-Life: Alyx.",
-                                                          "El renderizado foveado solo está disponible en Half-Life: Alyx."))
+            guard KLRenderPrefs.glFoveation(for: target) else {
+                return Reply(outcome: .notSupported,
+                             text: klL("Foveated rendering is not available in this game.",
+                                       "El renderizado foveado no está disponible en este juego."))
+            }
+            KLRenderPrefs.setFoveation(on, for: target)
+            NSLog("[qs] foveation \(on ? "ON" : "off") (\(target)): saved for the next launch")
+            lock.lock(); menuVersion += 1; lock.unlock()
+            requestMenuRaster()
+            return Reply(outcome: .nextLaunch,
+                         text: on ? klL("Foveated rendering saved as on; it applies when the game restarts.",
+                                        "Renderizado foveado guardado como activado; se aplicará al reiniciar el juego.")
+                                  : klL("Foveated rendering saved as off; it applies when the game restarts.",
+                                        "Renderizado foveado guardado como desactivado; se aplicará al reiniciar el juego."))
         }
         let t = target
         queue.async { KLGameSettingsStore.update(t) { s in
@@ -194,11 +218,20 @@ final class KLQuickSettings: @unchecked Sendable {
                                     "Renderizado foveado guardado como desactivado; se aplicará la próxima vez que arranque el juego."))
     }
 
-    /// Render scale (Alyx): saved for the next launch.
+    /// Render scale: saved for the next launch. Alyx's (KL_OPENVR_RT_SCALE,
+    /// KLPerformance) or, every other game, the per-game render resolution.
     @discardableResult
     func setRenderScale(_ v: Float) -> Reply {
         guard gameRunning else { return notRunning() }
-        guard isAlyx else { return Reply(outcome: .notSupported, text: "") }
+        guard isAlyx else {
+            KLRenderPrefs.setRenderScale(Double(v), for: target)
+            let pc = Int((v * 100).rounded())
+            NSLog("[qs] render resolution \(pc) % (\(target)): saved for the next launch")
+            lock.lock(); menuVersion += 1; lock.unlock()
+            requestMenuRaster()
+            return Reply(outcome: .nextLaunch, text: klL("Render resolution \(pc) % applies when the game restarts.",
+                                                         "Resolución \(pc) %: se aplicará al reiniciar el juego."))
+        }
         let t = target
         queue.async { KLGameSettingsStore.update(t) { s in
             var p = s.performance ?? KLPerformance(); p.renderScale = v; s.performance = p } }
@@ -313,10 +346,18 @@ final class KLQuickSettings: @unchecked Sendable {
             lock.lock(); let m = msaaNow; lock.unlock()
             let saved = KLGameSettingsStore.load(target).performance?.msaa ?? m
             r = setAntialiasing((saved == 4) ? 2 : 4)
+        case .foveation where !isAlyx:
+            r = setFoveation(!KLRenderPrefs.foveation(for: target))
         case .foveation:
             let saved = KLGameSettingsStore.load(target).performance?.foveate
             lock.lock(); let now = foveateNow; lock.unlock()
             r = setFoveation(!(saved ?? now))
+        case .renderScale where !isAlyx:
+            // 50…100 % in tenths, wrapping (the hub's slider has the 5 % steps).
+            let cur = KLRenderPrefs.renderScale(for: target)
+            let steps: [Double] = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+            let next = steps.first(where: { $0 > cur + 0.025 }) ?? steps[0]
+            r = setRenderScale(Float(next))
         case .renderScale:
             let cur = KLGameSettingsStore.load(target).performance?.renderScale ?? renderScaleBoot
             let steps: [Float] = [0.8, 0.9, 1.0]
@@ -350,6 +391,7 @@ final class KLQuickSettings: @unchecked Sendable {
         rasteredMenu = v
         let open = menuOpen, cur = cursor, st = status, on = hudOn
         let msaa = msaaNow, fov = foveateNow
+        let gfxFov = gfxFoveationBoot, gfxScale = gfxScaleBoot
         lock.unlock()
         guard open else { return }
         let es = Self.es
@@ -365,10 +407,22 @@ final class KLQuickSettings: @unchecked Sendable {
         rows.append((es ? "Visor de rendimiento" : "Performance overlay", on ? yes : no, ""))
         rows.append(("Antialiasing", alyx ? "\(savedMsaa)×" : "—",
                      !alyx ? na : savedMsaa != msaa ? next : ""))
-        rows.append((es ? "Renderizado foveado" : "Foveated rendering", alyx ? (savedFov ? yes : no) : "—",
-                     !alyx ? na : savedFov != fov ? next : ""))
-        rows.append((es ? "Escala de render" : "Render scale", alyx ? "\(Int((scale * 100).rounded())) %" : "—",
-                     !alyx ? na : abs(scale - renderScaleBoot) > 0.01 ? next : ""))
+        if alyx {
+            rows.append((es ? "Renderizado foveado" : "Foveated rendering", savedFov ? yes : no,
+                         savedFov != fov ? next : ""))
+            rows.append((es ? "Escala de render" : "Render scale", "\(Int((scale * 100).rounded())) %",
+                         abs(scale - renderScaleBoot) > 0.01 ? next : ""))
+        } else {
+            // Saved per game, fixed at boot: the note says when it differs from
+            // what this run is rendering with.
+            let restart = es ? "al reiniciar el juego" : "on game restart"
+            let f = KLRenderPrefs.foveation(for: target), rs = KLRenderPrefs.renderScale(for: target)
+            let glFov = KLRenderPrefs.glFoveation(for: target)
+            rows.append((es ? "Renderizado foveado" : "Foveated rendering", glFov ? (f ? yes : no) : "—",
+                         !glFov ? na : f != gfxFov ? restart : ""))
+            rows.append((es ? "Resolución" : "Resolution", "\(Int((rs * 100).rounded())) %",
+                         abs(rs - gfxScale) > 0.01 ? restart : ""))
+        }
         rows.append((es ? "Cerrar" : "Close", "", ""))
         let tex = KLPanelRaster.menu(title: es ? "Ajustes rápidos" : "Quick settings",
                                      subtitle: KLPanelRaster.gameName(target),

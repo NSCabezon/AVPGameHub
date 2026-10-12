@@ -88,7 +88,9 @@ final class AppSettings {
     /// Device + bundle, or a message saying which one is missing.
     func deviceTarget() throws -> (device: String, bundle: String) {
         guard !deviceID.isEmpty else { throw HubError(L("Falta el visor: elígelo en Estado o Ajustes", "No headset set: pick it in Status or Settings")) }
-        guard !bundleID.isEmpty else { throw HubError(L("Falta el bundle id del hub (Ajustes)", "No hub bundle id (Settings)")) }
+        guard !Toolchain.isPlaceholderBundleID(bundleID) else {
+            throw HubError(L("Falta el bundle id del hub, o es un ejemplo (Ajustes)", "No hub bundle id, or an example one (Settings)"))
+        }
         return (deviceID, bundleID)
     }
 
@@ -97,8 +99,8 @@ final class AppSettings {
         guard let k = kleptonURL else { return nil }
         let r = await ProcessRunner.capture(.bash("python3 visionos/targets.py hub", currentDirectory: k.path))
         guard r.status == 0 else { return nil }
-        // com.example.* is the placeholder in targets.py: not an id anyone can sign for.
-        return TargetVars.parse(r.output)["KLT_BUNDLE"].flatMap { $0.isEmpty || $0.hasPrefix("com.example.") ? nil : $0 }
+        // A placeholder (targets.py's com.example.* row in a fresh checkout) is not an id anyone can sign for.
+        return TargetVars.parse(r.output)["KLT_BUNDLE"].flatMap { Toolchain.isPlaceholderBundleID($0) ? nil : $0 }
     }
 
     /// The team id in the login keychain's Apple Development certificate (gen_xcodeproj.py's rule).

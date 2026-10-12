@@ -4,6 +4,7 @@
 // One family of the synthetic JNIEnv's Java classes. The mechanism (registries,
 // dispatch, id interning) is kl_jni.c; this file owns implementations and the
 // binding table that names them. See runtime/jni/kl_jni_int.h for the seam.
+#include "kl_obbmap.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -561,6 +562,22 @@ static void klj_media_open(klj_media *m, const char *what, long long off,
     const char *p = m->source;
     if (strncmp(p, "file://", 7) == 0) p += 7;
     m->dec = kl_avdec_open(p, off, len);
+    // UE asks for a movie by its LOOSE path when the file system said it was
+    // loose — and on this runtime OBB entries are (kl_obbmap serves them as
+    // virtual loose files), so the guest names a path that exists only for its
+    // own opens. Resolve it to the OBB and the entry's byte window instead
+    // (Metro Awakening's startup movies, all stored in main.<vc>.obb).
+    if (!m->dec && off == 0) {
+        char obb[1024]; long long base = 0, sz = 0;
+        if (kl_obbmap_resolve(p, obb, sizeof obb, &base, &sz)
+            && (len <= 0 || len == sz)) {
+            m->dec = kl_avdec_open(obb, base, sz);
+            if (m->dec)
+                KLJ_LOG("MediaPlayer14: %s served from %s (window %lld+%lld)",
+                        strrchr(p, '/') ? strrchr(p, '/') + 1 : p,
+                        strrchr(obb, '/') ? strrchr(obb, '/') + 1 : obb, base, sz);
+        }
+    }
     if (!m->dec)
         KLJ_LOG("MediaPlayer14: could not open %s (offset %lld, %lld bytes) — "
                 "setDataSource answers false and the guest's own no-media path "

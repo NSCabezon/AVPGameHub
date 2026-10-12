@@ -813,6 +813,23 @@ fail:
     return out;
 }
 
+int kl_obbmap_resolve(const char *loose, char *obb_out, size_t cap,
+                      long long *data_off, long long *size) {
+    if (!loose) return 0;
+    obb_entry *e = find(loose);
+    if (!e || e->is_zpak || e->method != 0) return 0;
+    FILE *probe = fopen(e->obb, "rb");
+    if (!probe) return 0;
+    uint64_t base;
+    int ok = data_offset(probe, e, &base);
+    fclose(probe);
+    if (!ok) return 0;
+    if (obb_out && cap) snprintf(obb_out, cap, "%s", e->obb);
+    if (data_off) *data_off = (long long)base;
+    if (size) *size = (long long)e->size;
+    return 1;
+}
+
 int kl_obbmap_open(const char *loose, int flags) {
     if (is_uproject(loose) && (flags & O_ACCMODE) == O_RDONLY) {
         int fd = open(g_uproject, O_RDONLY);

@@ -88,14 +88,21 @@ final class StatusModel {
 
         // Bundle id
         let bundleTitle = L("Bundle del hub", "Hub bundle id")
-        if !s.bundleID.isEmpty {
+        if !s.bundleID.isEmpty && !Toolchain.isPlaceholderBundleID(s.bundleID) {
             set("bundle", bundleTitle, .ok, s.bundleID)
+        } else if !s.bundleID.isEmpty {
+            set("bundle", bundleTitle, .fail, L("\(s.bundleID) es un ejemplo: nadie puede firmar con él",
+                                               "\(s.bundleID) is an example: nobody can sign for it"),
+                fix: L("Pon uno bajo tu propio dominio inverso (p. ej. com.<tú>.avpgamehub) en Ajustes o local/config.env, y no lo cambies: los datos de los juegos viven en su contenedor",
+                       "Use one under your own reverse domain (e.g. com.<you>.avpgamehub) in Settings or local/config.env, and keep it: the game data lives in its container"))
         } else if let b = await s.detectBundleID() {
             set("bundle", bundleTitle, .warn, L("targets.py dice \(b)", "targets.py says \(b)"),
                 fix: L("Guárdalo para lanzar y traer sesiones", "Save it to launch and pull sessions"),
                 actionTitle: L("Usar", "Use")) { s.bundleID = b }
         } else {
-            set("bundle", bundleTitle, .fail, L("sin configurar", "not set"), fix: L("Ponlo en Ajustes", "Set it in Settings"))
+            set("bundle", bundleTitle, .fail, L("sin configurar", "not set"),
+                fix: L("Ponlo en Ajustes o en local/config.env (KLEPTON_BUNDLE_ID), bajo tu propio dominio inverso",
+                       "Set it in Settings or local/config.env (KLEPTON_BUNDLE_ID), under your own reverse domain"))
         }
 
         // Accounts
@@ -146,6 +153,36 @@ final class StatusModel {
             let path = k.appendingPathComponent(piece.relativePath).path
             let ok = FileManager.default.fileExists(atPath: path)
             set(id, piece.name, ok ? .ok : .fail, path, fix: ok ? "" : piece.fix)
+        }
+
+        // Games: which ones the next hub build carries (their files are on this Mac) and what the
+        // others are missing. A game left out still shows in the hub's library, as not included.
+        rows.removeAll { $0.id.hasPrefix("game-") }
+        let gamesTitle = L("Juegos en la compilación", "Games in the build")
+        if let k {
+            let r = await ProcessRunner.capture(.bash("python3 visionos/targets.py --hub-check hub", currentDirectory: k.path), timeout: 60)
+            let games = Toolchain.parseHubCheck(r.output)
+            if r.status != 0 || games.isEmpty {
+                set("games", gamesTitle, .warn, r.output.trimmingCharacters(in: .whitespacesAndNewlines),
+                    fix: L("No se pudo leer la lista de juegos de targets.py", "Could not read the game list from targets.py"))
+            } else {
+                let inBuild = games.filter { $0.state == .ok }
+                set("games", gamesTitle, inBuild.isEmpty ? .warn : .ok,
+                    L("\(inBuild.count) de \(games.count)", "\(inBuild.count) of \(games.count)")
+                        + (inBuild.isEmpty ? "" : ": " + inBuild.map(\.display).joined(separator: ", ")),
+                    fix: inBuild.isEmpty
+                        ? L("Ningún juego tiene sus archivos en este Mac: el hub se compila solo con la biblioteca. docs/GUIDE.md › Getting each game's files",
+                            "No game's files are on this Mac: the hub builds with the library only. docs/GUIDE.md › Getting each game's files")
+                        : "")
+                for g in games where g.state != .ok {
+                    set("game-" + g.game, "  " + g.display, .warn,
+                        g.state == .skip ? L("fuera por KLEPTON_HUB_GAMES", "left out by KLEPTON_HUB_GAMES")
+                                         : L("no entra en la compilación: ", "not in the build: ") + g.missing,
+                        fix: g.hint)
+                }
+            }
+        } else {
+            set("games", gamesTitle, .fail, L("ruta de Klepton sin configurar", "Klepton path not set"), fix: L("Ajustes", "Settings"))
         }
     }
 }

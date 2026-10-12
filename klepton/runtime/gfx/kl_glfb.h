@@ -12,6 +12,10 @@ int  kl_glfb_enabled(void);
 int  kl_glfb_init(void);
 void kl_glfb_set_size(int w, int h);
 
+// Whether the ANGLE behind the reference renderer exposes GL_OVR_multiview2:
+// -1 before kl_glfb_init has run (or with KL_GLFB off), else 0 or 1.
+int  kl_glfb_angle_multiview(void);
+
 // The flat door's zero-readback storage. Requested BEFORE ANGLE comes up
 // (view_run does, for a flat Steam Link door), the root surface becomes a
 // pbuffer over an IOSurface kl_glfb allocates: the guest's default framebuffer

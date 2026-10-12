@@ -13,38 +13,40 @@ streaming.
 | Game | Store | Status |
 |---|---|---|
 | Half-Life: Alyx | `Steam` | Playable (tested through the early chapters) |
-| SUPERHOT VR | `Steam` `Meta` | Playable |
-| Beat Saber | `Meta` | 1.40.4 tested; current 1.40.8 needs **Update** in the Mac app |
+| SUPERHOT VR | `Steam` `Meta` | Playable (the port is built from the Steam Frame build) |
+| Beat Saber | `Meta` | 1.40.4 tested; Meta now sells 1.40.8, not yet tested |
+| Batman: Arkham Shadow | `Meta` | Runs on the Mac; being tested on the headset |
+| Metro Awakening | `Steam` | Runs on the Mac; being tested on the headset |
+| I Expect You To Die | `Meta` | Runs on the Mac; being tested on the headset |
+| Keep Talking and Nobody Explodes | `Meta` | Runs on the Mac; being tested on the headset |
 
 Half-Life: Alyx on a Vision Pro **M2**: ~45 fps (median frame 22.1 ms, 1 % low 29.5 fps), 4× MSAA
 with foveated rendering, 0 shader stalls, ~20 s loads.
 
 ## Quick start
 
-You need an Apple silicon Mac with Xcode, a (paid, recommended) Apple Developer account, a Vision
-Pro, PS VR2 Sense controllers and the games on your own accounts.
+You need an Apple silicon Mac with Xcode (signed in to your Apple account), a paid Apple Developer
+account (recommended), a Vision Pro in Developer Mode paired with that Mac, PS VR2 Sense
+controllers and the games on your own accounts.
 
 ```bash
 git clone https://github.com/NSCabezon/AVPGameHub.git && cd AVPGameHub
-cp local/config.env.example local/config.env   # your team, headset, bundle id
+cp local/config.env.example local/config.env   # set KLEPTON_BUNDLE_ID to your own id
 cd apps/macos && scripts/make-app.sh && open "build/AVP Game Hub.app"
 ```
 
-The Mac app checks your setup, signs you in to Steam and Meta, and builds and installs the hub.
-On the headset, open **AVP Game Hub**, pick a game and download it. Full details:
+The Mac app checks your setup (including which games' files are on this Mac), signs you in to
+Steam and Meta, and builds and installs the hub. A build carries only the games whose files you
+have; the others show in the hub as not included. Toolchain, per-game files and troubleshooting:
 [docs/GUIDE.md](docs/GUIDE.md).
 
 ## Highlights
 
-- **One library**, ownership checked per store; downloads happen on the headset.
+- **One library**, ownership checked per store; game data downloads happen on the headset.
 - **Siri**: *"Open game settings in Hub"* opens an in-game menu (antialiasing, foveation,
   performance overlay, render scale).
 - **Session stats** on the headset and the Mac.
-
-## Next steps
-
-Streaming from the Mac for games without an ARM64 build, more Steam Frame titles, more stores
-(SideQuest, itch.io, Pico).
+- **Play from Mac** (experimental): stream a game running on the Mac to the headset.
 
 ## Credits
 

@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -29,6 +30,7 @@
 #include "../runtime/xr/kl_ovrp.h"
 #include "../runtime/xr/kl_ovrplat.h"
 #include "../runtime/gfx/kl_view.h"
+#include "../runtime/net/kl_stream_host.h"
 #include "../runtime/gfx/kl_hostwin.h"
 #include "../runtime/diag/kl_sample.h"
 #include "../runtime/diag/kl_mprobe.h"
@@ -120,6 +122,97 @@ static int drm_call(const char *name) {
     }
 }
 
+// batman's language-pack downloads, against the packs on disk. A pack on disk:
+// a non-error DownloadById completion naming its path, then a "completed"
+// update notification (request 0) at its real size. A manifest pack that is
+// not there: an ERROR completion. An id that is no pack of the game: abort.
+static uint64_t langpack_id(const char *file) {
+    uint64_t h = 0;
+    for (const char *p = file; *p; p++) h = h * 131 + (unsigned char)*p;
+    return h ? h : 1;
+}
+static int check_langpack_download(void) {
+    const char *t = kl_driver_target_name();
+    if (!t || strcmp(t, "batman") != 0) return 0;
+    char mf[1200];
+    snprintf(mf, sizeof mf, "%s/obb/localized-asset-manifest.txt", kl_jni_files_dir());
+    FILE *f = fopen(mf, "r");
+    if (!f) { printf("  (no language-pack manifest at %s: pack downloads not checked)\n", mf); return 0; }
+    char have[256] = "", miss[256] = "", line[512];
+    unsigned long long have_size = 0;
+    while (fgets(line, sizeof line, f)) {
+        char *c1 = strchr(line, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+        if (!c2) continue;
+        *c2 = 0;
+        unsigned long long want = strtoull(c2 + 1, NULL, 10);
+        char path[1500];
+        snprintf(path, sizeof path, "%s/obb/%s", kl_jni_files_dir(), c1 + 1);
+        struct stat st;
+        int there = stat(path, &st) == 0 && (unsigned long long)st.st_size == want;
+        if (there && !have[0]) { snprintf(have, sizeof have, "%s", c1 + 1); have_size = want; }
+        if (!there && !miss[0]) snprintf(miss, sizeof miss, "%s", c1 + 1);
+    }
+    fclose(f);
+    typedef uint64_t (*u64_fn)(void *);
+    void *pop = kl_ovrplat_sym("ovr_PopMessage");
+    uint64_t (*dl)(uint64_t) = (uint64_t (*)(uint64_t))kl_ovrplat_sym("ovr_AssetFile_DownloadById");
+    u64_fn rid  = (u64_fn)kl_ovrplat_sym("ovr_Message_GetRequestID");
+    u64_fn err  = (u64_fn)kl_ovrplat_sym("ovr_Message_IsError");
+    u64_fn type = (u64_fn)kl_ovrplat_sym("ovr_Message_GetType");
+    u64_fn res  = (u64_fn)kl_ovrplat_sym("ovr_Message_GetAssetFileDownloadResult");
+    u64_fn upd  = (u64_fn)kl_ovrplat_sym("ovr_Message_GetAssetFileDownloadUpdate");
+    const char *(*rpath)(void *) = (const char *(*)(void *))kl_ovrplat_sym("ovr_AssetFileDownloadResult_GetFilepath");
+    u64_fn done  = (u64_fn)kl_ovrplat_sym("ovr_AssetFileDownloadUpdate_GetCompleted");
+    u64_fn bytes = (u64_fn)kl_ovrplat_sym("ovr_AssetFileDownloadUpdate_GetBytesTransferred");
+    const char *(*emsg)(void *) = (const char *(*)(void *))kl_ovrplat_sym("ovr_Error_GetMessage");
+    if (!pop || !dl || !rid || !err || !type || !res || !upd || !rpath || !done || !bytes || !emsg)
+        return fail("language-pack download: a symbol resolved to nothing");
+    void *(*popm)(void) = (void *(*)(void))pop;
+    while (popm()) { }
+    if (have[0]) {
+        uint64_t req = dl(langpack_id(have));
+        void *m = popm(), *n = popm();
+        if (!m || rid(m) != req || err(m) || type(m) != 0x2D008992u)
+            return fail("language-pack download: a pack on disk did not complete");
+        const char *p = rpath((void *)(uintptr_t)res(m));
+        if (!p || !strstr(p, have)) return fail("language-pack download: wrong path in the result");
+        if (!n || rid(n) != 0 || type(n) != 0x2FDD0CCDu)
+            return fail("language-pack download: no completed-update notification");
+        void *u = (void *)(uintptr_t)upd(n);
+        if (!done(u) || bytes(u) != have_size)
+            return fail("language-pack download: the update is not complete at the pack's size");
+        printf("  language pack %s on disk: its download completes from the disk (nothing fetched)\n", have);
+    }
+    if (miss[0]) {
+        uint64_t req = dl(langpack_id(miss));
+        void *m = popm();
+        if (!m || rid(m) != req || !err(m) || !strstr(emsg(m), "Game Hub"))
+            return fail("language-pack download: a missing pack did not get an error completion");
+        // ...and leaves the hub its note: the tag, then this file's name.
+        char note[1300], got[600] = "";
+        snprintf(note, sizeof note, "%s/klepton-voicepack-request.txt", kl_jni_files_dir());
+        FILE *nf = fopen(note, "r");
+        if (nf) { size_t k = fread(got, 1, sizeof got - 1, nf); got[k] = 0; fclose(nf); }
+        if (!nf || !strstr(got, miss))
+            return fail("language-pack download: no note for the hub naming the missing pack");
+        unlink(note);
+        printf("  language pack %s not on disk: its download gets an error completion "
+               "(and the hub's note)\n", miss);
+    }
+    fflush(NULL);
+    pid_t p = fork();
+    if (p == 0) {
+        freopen("/dev/null", "w", stderr);
+        dl(12345);                       // no pack of this game has this id
+        _exit(3);
+    }
+    int st = 0;
+    waitpid(p, &st, 0);
+    if (!(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT))
+        return fail("language-pack download: an id outside the manifest did NOT abort");
+    return 0;
+}
+
 // The line this asserts, in both directions. It moved once, deliberately, and
 // the move is the reason the value is now checked rather than just the refusal:
 //
@@ -199,6 +292,11 @@ static int check_drm_guard(void) {
     if (r == KLDRM_ABORTED)
         return fail("ovr_AssetFile_GetList aborted — enumerating DLC we do not have "
                     "is a fact about this host, not a licence decision");
+
+    // 4. batman's language packs: a download of one is answered from the disk
+    //    (kl_ovrplat.c, klplat_langpack_Download). Checked only where the game's
+    //    own manifest is present, against whatever packs are on disk right now.
+    if (check_langpack_download()) return 1;
 
     printf("  the app's own entitlement answers yes AND completes, DLC delivery\n"
            "  refuses and aborts (guard verified); course enumeration is answered\n"
@@ -851,6 +949,58 @@ static int view_run(void) {
     return rc;
 }
 
+// KL_STREAM_HOST=1: "Jugar desde el Mac" — the headset is the frontend. Same
+// shape as view_run (in-process guest thread, no fork, no re-exec), but the
+// main thread serves a UDP client instead of a window: poses arrive from the
+// network and every completed guest frame leaves as HEVC (kl_stream_host.c).
+//
+// The display description (frustum, IPD, rate, eye size) arrives in the
+// client's HELLO, and the guest reads some of it ONCE at boot (the display
+// rate certainly, Alyx's projection very likely), so by default the guest is
+// not started until a client has said hello. KL_STREAM_WAIT=0 boots at once
+// with the built-in Vision Pro description instead; a client that then
+// differs is applied late and the log says what that means.
+static int stream_run(void) {
+    // Alyx: the poses and frame the hub gives a LOCAL Alyx (kl_app.c's
+    // defaults), so a streamed session hands the guest the same controller
+    // pose path — M1 bridge, symmetric offer, hand velocities (gravity-glove
+    // flick) and the Touch raw frame with the inward tracked origin (the
+    // 2026-10-11 hand fix). Never overwriting: the launch environment wins.
+    // Not taken from kl_app.c: foveation and the Glovebox mobile render
+    // profile (the Mac has the GPU for full-rate, full-quality frames) and
+    // KL_GUEST_PACE_HZ (the stream host paces with KL_STREAM_LOCK_FPS).
+    if (!strcmp(TARGET->name, "alyx")) {
+        setenv("KL_OPENVR_MINIMAL", "1", 0);
+        setenv("KL_OPENVR_SUBMIT_PROJ", "1", 0);
+        setenv("KL_OPENVR_SYM_PROJ", "1", 0);
+        setenv("KL_OPENVR_HAND_VEL", "1", 0);
+        setenv("KL_OPENVR_TOUCH_FRAME", "1", 0);
+        setenv("KL_GLIBC_ARGS", "-vr -vulkan -console +vr_fidelity_level_auto 0 +vr_fidelity_level 3", 0);
+    }
+    if (kl_stream_host_start(TARGET->name) != 0) return fail("stream host: could not start");
+    if (kl_env_on("KL_STREAM_WAIT", 1)) {
+        fprintf(stderr, "[stream-host] waiting for a client's HELLO before booting the guest "
+                        "(KL_STREAM_WAIT=0 boots now with Vision Pro defaults)\n");
+        if (!kl_stream_host_wait_hello(-1.0, &g_view_quit)) return 1;
+    } else {
+        kl_stream_host_apply_defaults();
+    }
+    kl_stream_host_install_pacer();
+    pthread_t guest;
+    if (pthread_create(&guest, NULL, view_guest_thread, NULL)) {
+        fprintf(stderr, "stream: pthread_create failed\n");
+        return 1;
+    }
+    int rc = kl_stream_host_run(&g_view_quit);
+    g_view_quit = 1;
+    // The guest is inside its own main() and is not joined: the host stopping
+    // is the process ending, exactly as closing the viewer window is.
+    pthread_detach(guest);
+    kl_driver_report(stdout);
+    fflush(NULL);
+    _exit(rc);
+}
+
 int main(int argc, char **argv) {
     TARGET = kl_target_resolve(argc > 1 ? argv[1] : NULL);
     if (!TARGET) {
@@ -895,7 +1045,7 @@ int main(int argc, char **argv) {
     // wait forever for a window nobody creates; its eyes reach the viewer
     // through IVRCompositor::Submit instead.
     if (TARGET->kind == KL_GUEST_GLIBC && !kl_env_on("KL_GLIBC_HEADLESS", 0) &&
-        !getenv("KL_VIEW"))
+        !getenv("KL_VIEW") && !kl_stream_host_enabled())
         kl_flatwin_set_backend(kl_hostwin_backend());
 
     // Re-entry of the re-exec'd recon child (see below).
@@ -904,6 +1054,8 @@ int main(int argc, char **argv) {
 
     if (getenv("KL_VIEW"))
         return view_run();
+    if (kl_stream_host_enabled())
+        return stream_run();
 
     printf("=== DRM policy guard ===\n");
     // Under a debugger the forked child inherits the parent's Mach exception

@@ -56,6 +56,14 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
 // same thread. A frontend that never calls this keeps the call-time behaviour.
 void kl_ovrp_set_head_pose_time(double t);
 
+// Name the NEXT head pose with an opaque frontend tag (the streaming host
+// passes the headset's pose_id). It travels inside the pose through every
+// latch, and kl_ovrp_stage_render_pose reports it as `head_tag` for the frame
+// that was rendered with it — together with the time from
+// kl_ovrp_set_head_pose_time as `head_time`. Same thread and order as
+// kl_ovrp_set_head_pose_time: call immediately before kl_ovrp_set_head_pose.
+void kl_ovrp_set_head_pose_tag(uint64_t tag);
+
 // The pose the FRONTEND last published — where the head is now, including the
 // standing-eye-height default a headless run gets. This is the display side's
 // number: the viewer's composite reprojects towards it. It is deliberately not
@@ -305,6 +313,12 @@ typedef struct {
     // alone cannot: an angle is a rate times an interval, so a large delta is
     // either a fast head or a stale pose and the two want opposite fixes.
     uint64_t submit_ns;
+    // The frontend's tag and time for the head pose this frame was rendered
+    // with (kl_ovrp_set_head_pose_tag / _time), copied through the per-frame
+    // latch. 0 when the frontend tags nothing. The streaming host echoes these
+    // so the headset can pair the picture with the DeviceAnchor it sent.
+    uint64_t head_tag;
+    double   head_time;
     // ---- depth reprojection (KL_REPROJECT_DEPTH_MODE, kl_reproject.h) ----
     // The instant the head pose above is ABOUT, in the frontend's tracker clock
     // (CACurrentMediaTime seconds — the value it passed to
@@ -627,6 +641,13 @@ void kl_ovrp_set_eye_rotation(int eye, float qx, float qy, float qz, float qw);
 // nothing will ever ask for again. Values outside 30..240 are refused as a
 // failed measurement rather than passed on, because this one is a divisor.
 void kl_ovrp_set_display_frequency(float hz);
+
+// The size of the rect the guest actually rendered and submitted for `eye`
+// (the newest submission), whatever the stage image it is copied/scaled
+// into. Filed by the guest bridge (kl_openvr's Submit); read by the Mac stream
+// host to encode at the rendered size. _submit_size returns 0 until filed.
+void kl_ovrp_note_submit_size(int eye, int w, int h);
+int  kl_ovrp_submit_size(int eye, int *w, int *h);
 
 // Pin the display rate for a target known to mishandle a measured one (Steam
 // Link's VR client crashes on anything but a value stated up front), so the run

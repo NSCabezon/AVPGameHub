@@ -5,6 +5,7 @@
 // [DllImport("OVRPlugin")], which IL2CPP resolves with dlsym at runtime, so
 // serving the soname and naming every lookup gives the real surface without
 // guessing at any of the 466 exported entry points.
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -370,6 +371,36 @@ static uint64_t klovrp_RecenterTrackingOrigin2(int flags) {
     return OVRP_SUCCESS;
 }
 
+// --- The EyeLevel tracking origin -------------------------------------------
+//
+// Every frontend publishes the head in a FLOOR frame (the viewer at a standing
+// 1.6 m, visionOS from ARKit's floor-anchored world). That is what a FloorLevel
+// guest asked for and nothing has to change for one. But OVRPlugin's DEFAULT
+// origin is EyeLevel, where the origin is wherever the head was at startup (or
+// at the last recenter) — so a guest that never calls SetTrackingOriginType
+// (I Expect You To Die, a seated title) was handed a head 1.6 m above an origin
+// it believes is at eye height. Its calibration panel, placed at the rig origin,
+// then sat 1.7 m below the view: a black frame with a fully working game.
+//
+// So for an EyeLevel guest the node poses it READS (and only those — the
+// compositor's records stay in the frontend's frame, so reprojection deltas are
+// untouched) are taken relative to an anchor: the standing eye height until the
+// guest recenters, then the head position and heading at that recenter
+// (klovrp_eyelevel_apply; KL_OVRP_RECENTER_YAW=0 keeps the heading out of it).
+// KL_OVRP_EYELEVEL=0 restores the old, floor-frame answer.
+static int   g_recenter_count;
+static int   g_anchor_set;           // a recenter has captured the head
+static float g_anchor[3];
+
+static void klovrp_eyelevel_recenter(void);   // below, after the head pose
+
+static uint64_t klovrp_RecenterTrackingOrigin(unsigned flags) {
+    (void)flags;
+    ovrp_hit("ovrp_RecenterTrackingOrigin");
+    klovrp_eyelevel_recenter();
+    return 1;   // ovrpBool True (OVRP_1_0_0); libunity ignores it
+}
+
 static uint64_t klovrp_GetAudioOutId2(const void **out)      { return klovrp_GetDeviceId2("ovrp_GetAudioOutId2", out); }
 static uint64_t klovrp_GetAudioInId2(const void **out)       { return klovrp_GetDeviceId2("ovrp_GetAudioInId2", out); }
 
@@ -728,7 +759,7 @@ static uint64_t klovrp_GetSystemHeadsetType2(int *out) {
 static uint64_t klovrp_GetLocalTrackingSpaceRecenterCount(int *out) {
     ovrp_hit("ovrp_GetLocalTrackingSpaceRecenterCount");
     if (!out) return -1001;
-    *out = 0;
+    *out = g_recenter_count;   // bumped by ovrp_RecenterTrackingOrigin
     return OVRP_SUCCESS;
 }
 
@@ -1047,6 +1078,21 @@ static float klovrp_forced_hz(void) {
         }
     }
     return forced;
+}
+
+static int g_submit_wh[2][2];
+void kl_ovrp_note_submit_size(int eye, int w, int h) {
+    if (eye < 0 || eye > 1 || w <= 0 || h <= 0) return;
+    __atomic_store_n(&g_submit_wh[eye][0], w, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_submit_wh[eye][1], h, __ATOMIC_RELAXED);
+}
+int kl_ovrp_submit_size(int eye, int *w, int *h) {
+    if (eye < 0 || eye > 1) return 0;
+    int ww = __atomic_load_n(&g_submit_wh[eye][0], __ATOMIC_RELAXED);
+    int hh = __atomic_load_n(&g_submit_wh[eye][1], __ATOMIC_RELAXED);
+    if (w) *w = ww;
+    if (h) *h = hh;
+    return ww > 0 && hh > 0;
 }
 
 void kl_ovrp_set_display_frequency(float hz) {
@@ -1940,13 +1986,17 @@ typedef struct {
     // dates nothing (the macOS viewer). Rides in the struct for the reason the
     // motion does: every latch copies a klovrp_pose by value, so the time the
     // guest's frame was drawn at is coherent with the pose it was drawn with.
-    // Read only by the depth-reprojection modes (kl_ovrp_render_pose.pose_time).
+    // Read by the depth-reprojection modes (kl_ovrp_render_pose.pose_time) and
+    // echoed by the streaming host (head_time).
     double t;
+    // The frontend's own name for this sample (kl_ovrp_set_head_pose_tag),
+    // HEAD only, inside the pose for the same reason: the streaming host
+    // echoes the tag of the pose a frame was RENDERED with. 0 = never named.
+    uint64_t tag;
 } klovrp_pose;
 static klovrp_pose g_head_pose = {
     0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
-    0,   // motion_valid: nothing has been published, so there is nothing to know
-    0,   // t: and it is about no instant
+    0, 0, 0,   // motion_valid, t, tag: nothing has been published, so there is nothing to know
 };
 static int g_head_set;              // has a frontend ever written a head pose?
 // The two hands, published by the same frontend in the same breath. Declared
@@ -2212,6 +2262,85 @@ static klovrp_pose klovrp_head(void) {
     return klovrp_head_published();
 }
 
+static int klovrp_eyelevel_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_EYELEVEL", 1);
+    return on && g_tracking_origin == 0;
+}
+
+// The point an EyeLevel guest's origin sits at, in the frontend's floor frame.
+static void klovrp_eyelevel_anchor(float out[3]) {
+    out[0] = out[1] = out[2] = 0.0f;
+    if (!klovrp_eyelevel_on()) return;
+    if (g_anchor_set) { memcpy(out, g_anchor, sizeof g_anchor); return; }
+    // Only a PUBLISHED head is in the floor frame. With no frontend the default
+    // head already sits at the EyeLevel origin (klovrp_eye_height answers 0
+    // there), and subtracting a standing eye height from it put a headless
+    // run's camera 1.6 m under the floor — every KL_GLFB_OUT capture black.
+    if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) return;
+    static float h = -1.0f;   // read once: this runs ~20 times a guest frame
+    if (h < 0.0f) h = kl_env_float("KL_OVRP_EYE_HEIGHT", 1.6f);
+    out[1] = h;
+}
+
+// The yaw a recenter takes out, as the half-angle sine/cosine of a rotation
+// about +Y. Identity until the first recenter. A recenter on a Quest makes the
+// head's CURRENT heading the new forward (pitch and roll are gravity's and stay),
+// so a seated title that recenters — IEYTD does, from its calibration and from
+// the pause menu — expects its scene to swing round to wherever the player
+// faces. Position alone left the scene behind the player if they had turned.
+// KL_OVRP_RECENTER_YAW=0 restores position-only.
+static float g_anchor_yaw_s, g_anchor_yaw_c = 1.0f;
+
+// Carry a pose read in the frontend's frame into the recentred EyeLevel frame:
+// subtract the anchor, then undo the anchor's yaw on position, orientation and
+// both velocities. A no-op (beyond the subtraction) until a recenter.
+static void klovrp_eyelevel_apply(float *f /* ovrpPoseStatef */) {
+    float anc[3];
+    klovrp_eyelevel_anchor(anc);     // zero unless an EyeLevel guest
+    f[4] -= anc[0]; f[5] -= anc[1]; f[6] -= anc[2];
+    if (!klovrp_eyelevel_on() || !g_anchor_set) return;
+    float s = g_anchor_yaw_s, c = g_anchor_yaw_c;
+    if (s == 0.0f) return;
+    // Rotation by -yaw about +Y: v' = (x cos - z sin... ) with the full angle,
+    // so form cos/sin of the full angle from the half-angle pair.
+    float C = c * c - s * s, S = 2.0f * s * c;     // cos(yaw), sin(yaw)
+    for (int v = 4; v <= 13; v += 3) {           // pos +0x10, vel +0x1c, (acc), angvel +0x34
+        if (v == 10) continue;                     // acceleration: left zero
+        float x = f[v], z = f[v + 2];
+        f[v]     = C * x - S * z;
+        f[v + 2] = S * x + C * z;
+    }
+    // q' = conj(qyaw) * q, qyaw = (0, s, 0, c).
+    float qx = f[0], qy = f[1], qz = f[2], qw = f[3];
+    f[0] = c * qx - s * qz;
+    f[1] = c * qy - s * qw;
+    f[2] = c * qz + s * qx;
+    f[3] = c * qw + s * qy;
+}
+
+static void klovrp_eyelevel_recenter(void) {
+    klovrp_pose h = klovrp_head_published();
+    g_anchor[0] = h.px; g_anchor[1] = h.py; g_anchor[2] = h.pz;
+    // The heading: where the head's -Z points, flattened onto the floor.
+    float yaw = 0.0f;
+    static int want_yaw = -1;
+    if (want_yaw < 0) want_yaw = kl_env_on("KL_OVRP_RECENTER_YAW", 1);
+    if (want_yaw) {
+        float fx = -2.0f * (h.qx * h.qz + h.qw * h.qy);
+        float fz = -(1.0f - 2.0f * (h.qx * h.qx + h.qy * h.qy));
+        if (fx * fx + fz * fz > 1e-6f) yaw = atan2f(-fx, -fz);
+    }
+    g_anchor_yaw_s = sinf(0.5f * yaw);
+    g_anchor_yaw_c = cosf(0.5f * yaw);
+    g_anchor_set = 1;
+    g_recenter_count++;
+    fprintf(stderr, "  [ovrp] recenter #%d: EyeLevel origin now at head "
+                    "(%.3f, %.3f, %.3f), yaw %.1f deg%s\n", g_recenter_count, h.px, h.py, h.pz,
+            (double)(yaw * 57.29578f),
+            klovrp_eyelevel_on() ? "" : " (not applied: FloorLevel or KL_OVRP_EYELEVEL=0)");
+}
+
 // The shortest angle between two orientations, in degrees. Used only to report
 // how much motion the latch is absorbing.
 static float klovrp_quat_degrees(const klovrp_pose *a, const klovrp_pose *b) {
@@ -2272,8 +2401,11 @@ static void klovrp_headless_pose(void) {
     state = 3;
 }
 
+static void klovrp_head_script(void);   // KL_OVRP_HAND_SCRIPT's 'H' track, below
+
 void kl_ovrp_frame_latch(void) {
     klovrp_headless_pose();
+    klovrp_head_script();
     if (!klovrp_latch_enabled()) return;
     klovrp_pose h = klovrp_pose_read(&g_head_pose);
     klovrp_pose l = klovrp_pose_read(&g_hand_pose[0]);
@@ -2433,6 +2565,13 @@ void kl_ovrp_set_head_pose_time(double t) {
     g_head_pose_time = t;
 }
 
+// The tag the NEXT published head pose carries into the frame record; same
+// thread and same call order as kl_ovrp_set_head_pose_time.
+static uint64_t g_head_pose_tag;
+void kl_ovrp_set_head_pose_tag(uint64_t tag) {
+    g_head_pose_tag = tag;
+}
+
 // How far ahead of "now" the frontend predicts the head it publishes — the
 // compositor's own lead (its presentation time minus the moment it queried),
 // smoothed. A guest predicting its frame to when it will be SEEN adds this:
@@ -2460,9 +2599,10 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
     g_head_raw_y = py; g_head_raw_seen = 1;
     if (g_eye_origin_want) klovrp_eye_origin_capture(py, "first head pose after the guest selected EyeLevel");
     py -= klovrp_origin_y();
-    klovrp_pose v = { px, py, pz, qx, qy, qz, qw, 0, 0, 0, 0, 0, 0, 0, 0 };
+    klovrp_pose v = { px, py, pz, qx, qy, qz, qw, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     klovrp_derive_motion(&v, &g_head_hist, g_head_pose_time);
     v.t = g_head_pose_time;
+    v.tag = g_head_pose_tag;
     klovrp_pose_write(&g_head_pose, &v);
     __atomic_store_n(&g_head_set, 1, __ATOMIC_RELEASE);
     // Pose trace, once a second: the pushed head Y + tracking-origin frame
@@ -2580,8 +2720,14 @@ static int klovrp_fs_get(int frame_index, klovrp_fsample *out) {
 static void klovrp_record_indexed_sample(int frame_index, const klovrp_pose *h);
 static int kl_env_on_once_fs(void);
 
+// The guest's own frame index as Update2 last named it: the frame clock for a
+// GL guest on the legacy path, which never reaches the Vulkan submit counter
+// KL_OVRP_POKE's `f<frame>` form was written against.
+static volatile int g_update_frame_index;
+
 static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     ovrp_hit("ovrp_Update2");
+    if (frame_index > g_update_frame_index) g_update_frame_index = frame_index;
     { static unsigned n;
       if (n < 48 || n % 600 == 0 || klovrp_pose_trace(g_trace_frame)) {
         uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
@@ -2943,6 +3089,8 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     r->stage = -1;
     r->complete = 0;
     r->submit_ns = klovrp_mono_ns();
+    r->head_tag = h.tag;
+    r->head_time = h.t;
     // Unity's own frame counter — the number it picks its stage from.
     g_frames.pending_index = guest_frame_index;
     pthread_mutex_unlock(&g_frames.mu);
@@ -3499,6 +3647,8 @@ void kl_ovrp_frame_begin_external(void) {
     r->stage = -1;
     r->complete = 0;
     r->submit_ns = klovrp_mono_ns();
+    r->head_tag = h.tag;
+    r->head_time = h.t;
     // The latched sample's own instant; a guest that predicts moves it with
     // kl_ovrp_frame_set_pose_time. No depth until the guest files one.
     r->pose_time = h.t;
@@ -3781,7 +3931,7 @@ void kl_ovrp_set_hand_motion(int hand, float px, float py, float pz,
                              float avx, float avy, float avz) {
     if ((unsigned)hand > 1) return;
     py -= klovrp_origin_y();
-    klovrp_pose v = { px, py, pz, qx, qy, qz, qw, vx, vy, vz, avx, avy, avz, 1, 0 };
+    klovrp_pose v = { px, py, pz, qx, qy, qz, qw, vx, vy, vz, avx, avy, avz, 1, 0, 0 };
 // A measured velocity is authoritative — nothing is derived here. The
     // history still advances, so a publisher that later drops to the pose-only
     // call differentiates against the right previous sample instead of a gap.
@@ -3800,7 +3950,7 @@ void kl_ovrp_set_hand_pose(int hand, float px, float py, float pz,
                            float qx, float qy, float qz, float qw) {
     if ((unsigned)hand > 1) return;
     py -= klovrp_origin_y();
-    klovrp_pose v = { px, py, pz, qx, qy, qz, qw, 0, 0, 0, 0, 0, 0, 0, 0 };
+    klovrp_pose v = { px, py, pz, qx, qy, qz, qw, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     klovrp_derive_motion(&v, &g_hand_hist[hand], 0);
     klovrp_pose_write(&g_hand_pose[hand], &v);
     __atomic_store_n(&g_hand_set[hand], 1, __ATOMIC_RELEASE);
@@ -3903,23 +4053,55 @@ void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
 // lands on the screens they show. Seconds cannot do that here — startup is
 // dominated by the engine's one-time shader optimization, which is minutes and
 // is not the same length twice.
-#define KLOVRP_POKE_MAX 32
+#define KLOVRP_POKE_MAX 128
 static struct klovrp_poke {
     double   t;                       // seconds after the first read
     long     frame;                   // ...or the guest frame, when >= 0
     uint32_t b[2];                    // raw button bits, per hand
+    uint32_t tch[2], near[2];         // extra Touches / NearTouches bits (RT=, RN=, ...)
     float    idx[2], grip[2];         // triggers, per hand
     float    sx, sy;                  // right thumbstick
+    double   hold;                    // this press's own hold (s), 0 = the global one
     int      fired;
 } g_poke[KLOVRP_POKE_MAX];
 static int    g_poke_n = -1;          // -1 = not parsed yet
 static double g_poke_hold = 0.25;     // seconds a press is held
 static double g_poke_t0;
 
+// Seconds since the guest's first controller read — the one clock KL_OVRP_POKE
+// and KL_OVRP_HAND_SCRIPT share, so a press and a hand movement written with
+// the same number happen together.
+static double klovrp_script_clock(void) {
+    double now = klovrp_mono_now();
+    if (g_poke_t0 == 0.0) g_poke_t0 = now;
+    return now - g_poke_t0;
+}
+
+// ...and the frame clock both scripts' `f<frame>` form reads: the Vulkan submit
+// counter where there is one, else the frame index Update2 names.
+static unsigned klovrp_script_frame(void) {
+    unsigned f = __atomic_load_n(&g_vk_frame, __ATOMIC_RELAXED);
+    return f ? f : (unsigned)g_update_frame_index;
+}
+
 // One name to one control. Right hand unless the name says otherwise, which is
 // OVRPlugin's own convention: A/B are the right controller's face buttons and
 // X/Y the left's, so a table keyed on the name cannot put them on one hand.
 static int klovrp_poke_name(const char *n, size_t len, struct klovrp_poke *p) {
+    // `RT=0x10`, `LN=0x1`: raw Touches (T) / NearTouches (N) bits for a hand,
+    // with no button — a capacitive state no named control produces on its own.
+    if (len > 3 && (n[0] == 'R' || n[0] == 'L' || n[0] == 'r' || n[0] == 'l') &&
+        (n[1] == 'T' || n[1] == 'N' || n[1] == 't' || n[1] == 'n') && n[2] == '=') {
+        char tmp[24];
+        snprintf(tmp, sizeof tmp, "%.*s", (int)(len - 3), n + 3);
+        char *e = NULL;
+        unsigned long v = strtoul(tmp, &e, 0);
+        if (!e || *e) return 0;
+        int hand = (n[0] == 'R' || n[0] == 'r');
+        if (n[1] == 'T' || n[1] == 't') p->tch[hand] |= (uint32_t)v;
+        else                            p->near[hand] |= (uint32_t)v;
+        return 1;
+    }
     struct { const char *n; int hand; uint32_t bit; float idx, grip, sx, sy; } t[] = {
         { "A",     1, KL_OVRP_RAW_A,     0, 0, 0, 0 },
         { "B",     1, KL_OVRP_RAW_B,     0, 0, 0, 0 },
@@ -3974,21 +4156,33 @@ static void klovrp_poke_parse(void) {
         int ok = 1;
         for (;;) {
             const char *w = s;
-            while (*s && *s != ',' && *s != '+' && *s != ' ') s++;
+            while (*s && *s != ',' && *s != '+' && *s != ' ' && *s != '@') s++;
 // Named, not skipped: a misspelt button is a press that never
             // happens, and a script that silently does less than it says
             // reads as the guest ignoring input.
             if (!klovrp_poke_name(w, (size_t)(s - w), &p)) {
                 fprintf(stderr, "  [ovrp] KL_OVRP_POKE: no button named \"%.*s\" — "
                                 "A B X Y START BACK RTRIG LTRIG RGRIP LGRIP UP "
-                                "DOWN LEFT RIGHT\n", (int)(s - w), w);
+                                "DOWN LEFT RIGHT, or RT=/LT=/RN=/LN=<bits>\n", (int)(s - w), w);
                 ok = 0;
+            }
+            if (*s == '@') {
+                // `15:A@3000` — this press held 3000 ms, whatever the global
+                // KL_OVRP_POKE_HOLD_MS says: a "hold any button" calibration
+                // and a trigger click want different lengths in one script.
+                char *e2 = NULL;
+                long ms = strtol(s + 1, &e2, 10);
+                if (e2 != s + 1 && ms > 0) p.hold = (double)ms / 1000.0;
+                s = e2 ? e2 : s + 1;
             }
             if (*s != '+') break;
             s++;
         }
         if (ok) g_poke[g_poke_n++] = p;
     }
+    if (g_poke_n == KLOVRP_POKE_MAX && *s)
+        fprintf(stderr, "  [ovrp] KL_OVRP_POKE: %d presses is the limit — the rest of the "
+                        "script is IGNORED\n", KLOVRP_POKE_MAX);
     if (g_poke_n)
         fprintf(stderr, "  [ovrp] KL_OVRP_POKE: %d press(es) scripted, %.0f ms each, "
                         "timed from the guest's first controller read\n",
@@ -4001,29 +4195,30 @@ static klovrp_input_state klovrp_input(int hand) {
     klovrp_input_state v = g_input[hand];
     if (g_poke_n < 0) klovrp_poke_parse();
     if (g_poke_n == 0) return v;
-    double now = klovrp_mono_now();
-    if (g_poke_t0 == 0.0) g_poke_t0 = now;
-    double t = now - g_poke_t0;
-    unsigned frame = __atomic_load_n(&g_vk_frame, __ATOMIC_RELAXED);
+    double t = klovrp_script_clock();
+    unsigned frame = klovrp_script_frame();
     for (int i = 0; i < g_poke_n; i++) {
         struct klovrp_poke *p = &g_poke[i];
         if (p->frame >= 0) {
 // A hold in FRAMES for a press timed in frames: the frame rate here
             // is whatever the host manages, so a press held for a quarter of a
             // second could be one frame or forty.
-            long held = (long)(g_poke_hold * 90.0);
+            long held = (long)((p->hold > 0 ? p->hold : g_poke_hold) * 90.0);
             if ((long)frame < p->frame || (long)frame > p->frame + held) continue;
-        } else if (t < p->t || t > p->t + g_poke_hold) {
+        } else if (t < p->t || t > p->t + (p->hold > 0 ? p->hold : g_poke_hold)) {
             continue;
         }
         if (!p->fired) {
             p->fired = 1;
             fprintf(stderr, "  [ovrp] KL_OVRP_POKE at %.1f s / frame %u: "
-                            "buttons L=%#x R=%#x\n", t, frame, p->b[0], p->b[1]);
+                            "buttons L=%#x R=%#x touches L=%#x R=%#x near L=%#x R=%#x\n",
+                    t, frame, p->b[0], p->b[1], p->tch[0], p->tch[1], p->near[0], p->near[1]);
         }
         v.buttons    |= p->b[hand];
         v.touches    |= p->b[hand];
         v.neartouches |= p->b[hand];
+        v.touches     |= p->tch[hand];
+        v.neartouches |= p->near[hand];
         if (p->idx[hand] > v.index_trigger) v.index_trigger = p->idx[hand];
         if (p->grip[hand] > v.hand_trigger) v.hand_trigger = p->grip[hand];
         if (hand == 1) {
@@ -4164,6 +4359,151 @@ static void klovrp_hand_sweep(const klovrp_pose *head, klovrp_pose *hand) {
     hand->px = head->px; hand->py = head->py; hand->pz = head->pz;
 }
 
+// KL_OVRP_HAND_SCRIPT: a scripted hand PATH, the pose half of KL_OVRP_POKE.
+//
+//   KL_OVRP_HAND_SCRIPT="20:R:0.18,-0.43,-0.25;22:R:0.18,-0.43,-0.38,-10;24:R:0.18,-0.43,-0.25"
+//
+// Keyframes `<seconds>:<L|R>:<x>,<y>,<z>[,<pitch>[,<yaw>]]` (degrees, pitch up
+// about the head's x, yaw left about its y), `;`-separated, on the
+// POKE clock (seconds from the guest's first controller read), or written
+// `f<frame>` on the guest's frame index (the first keyframe picks the clock for
+// the whole script). The position is
+// HEAD-relative in OVRPlugin's frame (metres, +x right, +y up, -z forward) and
+// the orientation is the head's, pitched about its x axis — the same frame as
+// KL_OVRP_HANDS_IN_VIEW, so a value read off a headless run (head at identity)
+// is simply the tracking-space position. Between two keyframes of a hand the
+// pose is interpolated linearly, so physics sees a hand MOVE into a collider
+// rather than appear inside it; before a hand's first keyframe nothing is
+// overridden, and after its last the hand holds there. It exists for titles
+// whose UI is physical — IEYTD's "Done" is a button the fingertip pushes — so
+// a headless run can press it. Diagnostic: it replaces the frontend's hands.
+// An `H` track moves the head: `<s>:H:x,y,z[,yaw[,pitch]]`, absolute in the
+// frontend's (floor) frame, published as a frontend would — for headless runs
+// whose tutorial asks the player to lean or look.
+#define KLOVRP_HSCRIPT_MAX 256
+static struct { double t; int by_frame, hand; float p[3], pitch, pitch2; int said; } g_hs[KLOVRP_HSCRIPT_MAX];
+static int g_hs_n = -1;
+
+static void klovrp_hand_script_parse(void) {
+    g_hs_n = 0;
+    const char *e = getenv("KL_OVRP_HAND_SCRIPT");
+    if (!e || !*e) return;
+    static char buf[16384];
+    if (strlen(e) >= sizeof buf)
+        fprintf(stderr, "  [ovrp] KL_OVRP_HAND_SCRIPT: longer than %zu bytes — the tail is "
+                        "IGNORED\n", sizeof buf - 1);
+    snprintf(buf, sizeof buf, "%s", e);
+    for (char *save = NULL, *k = strtok_r(buf, ";", &save); k && g_hs_n < KLOVRP_HSCRIPT_MAX;
+         k = strtok_r(NULL, ";", &save)) {
+        double t; char h; float x, y, z, pitch = 0, pitch2 = 0;
+        while (*k == ' ') k++;
+        int by_frame = (*k == 'f' || *k == 'F');
+        int n = sscanf(k + by_frame, "%lf:%c:%f,%f,%f,%f,%f", &t, &h, &x, &y, &z, &pitch, &pitch2);
+        h = (char)toupper((unsigned char)h);
+        if (n < 5 || (h != 'L' && h != 'R' && h != 'H')) {
+            fprintf(stderr, "  [ovrp] KL_OVRP_HAND_SCRIPT: cannot read \"%s\" — want "
+                            "<seconds>:<L|R|H>:x,y,z[,pitch|yaw,pitch]; the rest is ignored\n", k);
+            break;
+        }
+        g_hs[g_hs_n].t = t;
+        g_hs[g_hs_n].by_frame = by_frame;
+        g_hs[g_hs_n].hand = h == 'L' ? 0 : h == 'R' ? 1 : 2;
+        g_hs[g_hs_n].p[0] = x; g_hs[g_hs_n].p[1] = y; g_hs[g_hs_n].p[2] = z;
+        g_hs[g_hs_n].pitch = pitch;      // the head's YAW (its 4th value)
+        g_hs[g_hs_n].pitch2 = pitch2;    // the head's pitch (its 5th)
+        g_hs[g_hs_n].said = 0;
+        g_hs_n++;
+    }
+    if (g_hs_n == KLOVRP_HSCRIPT_MAX)
+        fprintf(stderr, "  [ovrp] KL_OVRP_HAND_SCRIPT: %d keyframes is the limit — any "
+                        "after it are IGNORED\n", KLOVRP_HSCRIPT_MAX);
+    if (g_hs_n)
+        fprintf(stderr, "  [ovrp] KL_OVRP_HAND_SCRIPT: %d keyframe(s), head-relative, "
+                        "on the KL_OVRP_POKE clock\n", g_hs_n);
+}
+
+// The keyframes bracketing now for track `h` (0 left, 1 right, 2 head): `a`
+// the last at or before, `b` the first after (-1 when none). 0 = no keyframe yet.
+static int klovrp_hs_find(int h, double *tout, int *ao, int *bo) {
+    if (g_hs_n < 0) klovrp_hand_script_parse();
+    if (g_hs_n == 0) return 0;
+    // One clock per script: the first keyframe's form decides (`f<frame>` or
+    // seconds), so interpolation never mixes units.
+    double t = g_hs[0].by_frame ? (double)klovrp_script_frame() : klovrp_script_clock();
+    int a = -1, b = -1;
+    for (int i = 0; i < g_hs_n; i++) {
+        if (g_hs[i].hand != h) continue;
+        if (g_hs[i].t <= t) { if (a < 0 || g_hs[i].t >= g_hs[a].t) a = i; }
+        else if (b < 0 || g_hs[i].t < g_hs[b].t) b = i;
+    }
+    if (a < 0) return 0;
+    if (!g_hs[a].said) {
+        g_hs[a].said = 1;
+        fprintf(stderr, "  [ovrp] KL_OVRP_HAND_SCRIPT at %.1f s: %s -> (%.3f %.3f %.3f) %.0f %.0f\n",
+                t, h == 2 ? "head" : h ? "right hand" : "left hand", (double)g_hs[a].p[0],
+                (double)g_hs[a].p[1], (double)g_hs[a].p[2], (double)g_hs[a].pitch,
+                (double)g_hs[a].pitch2);
+    }
+    *tout = t; *ao = a; *bo = b;
+    return 1;
+}
+
+// The head track ('H' keyframes): ABSOLUTE in the frontend's frame (metres,
+// yaw then pitch in degrees), published as if a frontend had — so it is for
+// runs with no frontend. Called once a guest frame from the latch.
+static void klovrp_head_script(void) {
+    double t; int a, b;
+    if (!klovrp_hs_find(2, &t, &a, &b)) return;
+    float u = 0.0f;
+    if (b >= 0 && g_hs[b].t > g_hs[a].t) u = (float)((t - g_hs[a].t) / (g_hs[b].t - g_hs[a].t));
+    float v[5];
+    for (int i = 0; i < 3; i++)
+        v[i] = g_hs[a].p[i] + (b >= 0 ? u * (g_hs[b].p[i] - g_hs[a].p[i]) : 0.0f);
+    v[3] = g_hs[a].pitch + (b >= 0 ? u * (g_hs[b].pitch - g_hs[a].pitch) : 0.0f);
+    v[4] = g_hs[a].pitch2 + (b >= 0 ? u * (g_hs[b].pitch2 - g_hs[a].pitch2) : 0.0f);
+    // q = yaw(+Y) * pitch(+X)
+    float hy = v[3] * 0.008726646f, hp = v[4] * 0.008726646f;
+    float sy = sinf(hy), cy = cosf(hy), sp = sinf(hp), cp = cosf(hp);
+    kl_ovrp_set_head_pose(v[0], v[1], v[2], cy * sp, sy * cp, -sy * sp, cy * cp);
+}
+
+// 1 when the script owns this hand right now (and *hand is written).
+static int klovrp_hand_script(const klovrp_pose *head, int h, klovrp_pose *hand) {
+    double t; int a, b;
+    if (!klovrp_hs_find(h, &t, &a, &b)) return 0;
+    float u = 0.0f;
+    if (b >= 0 && g_hs[b].t > g_hs[a].t) u = (float)((t - g_hs[a].t) / (g_hs[b].t - g_hs[a].t));
+    float d[3], pitch;
+    for (int i = 0; i < 3; i++)
+        d[i] = g_hs[a].p[i] + (b >= 0 ? u * (g_hs[b].p[i] - g_hs[a].p[i]) : 0.0f);
+    pitch = g_hs[a].pitch + (b >= 0 ? u * (g_hs[b].pitch - g_hs[a].pitch) : 0.0f);
+    float yaw = g_hs[a].pitch2 + (b >= 0 ? u * (g_hs[b].pitch2 - g_hs[a].pitch2) : 0.0f);
+    float ox, oy, oz;
+    klovrp_qrot(head, d[0], d[1], d[2], &ox, &oy, &oz);
+    // q = q_head * yaw(+Y) * pitch(+X): the hand turned left by `yaw`, then
+    // tipped up by `pitch`, both in the head's frame.
+    float hp = pitch * 0.5f * 3.14159265f / 180.0f, hy = yaw * 0.5f * 3.14159265f / 180.0f;
+    float sp = sinf(hp), cp = cosf(hp), sy = sinf(hy), cy = cosf(hy);
+    float rx = cy * sp, ry = sy * cp, rz = -sy * sp, rw = cy * cp;
+    *hand = *head;
+    hand->qw = head->qw * rw - head->qx * rx - head->qy * ry - head->qz * rz;
+    hand->qx = head->qw * rx + head->qx * rw + head->qy * rz - head->qz * ry;
+    hand->qy = head->qw * ry - head->qx * rz + head->qy * rw + head->qz * rx;
+    hand->qz = head->qw * rz + head->qx * ry - head->qy * rx + head->qz * rw;
+    hand->px = head->px + ox; hand->py = head->py + oy; hand->pz = head->pz + oz;
+    // Motion is the script's to state, not the head's: the interpolation's own
+    // rate, so a physics engine pushing a button sees the hand's real speed.
+    hand->vx = hand->vy = hand->vz = 0;
+    hand->avx = hand->avy = hand->avz = 0;
+    if (b >= 0 && g_hs[b].t > g_hs[a].t) {
+        // seconds; a frame-timed script is taken at ~90 frames a second
+        float dt = (float)(g_hs[b].t - g_hs[a].t) * (g_hs[0].by_frame ? 1.0f / 90.0f : 1.0f), w[3];
+        for (int i = 0; i < 3; i++) w[i] = (g_hs[b].p[i] - g_hs[a].p[i]) / dt;
+        klovrp_qrot(head, w[0], w[1], w[2], &hand->vx, &hand->vy, &hand->vz);
+    }
+    return 1;
+}
+
 // KL_OVRP_POSE_TIME: fill ovrpPoseStatef.Time (the double at +0x50) with the
 // moment the step's sample was latched. It was left 0, which a guest reads as
 // "tracking has never produced a sample": AC Nexus drives its physical hand
@@ -4261,6 +4601,7 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         } else {
             hand = klovrp_step_hand(step, h);
         }
+        { klovrp_pose sh; if (klovrp_hand_script(&head, h, &sh)) hand = sh; }
         klovrp_dump_vrdevice();
         klovrp_hand_sweep(&head, &hand);
         p = &hand;
@@ -4268,8 +4609,7 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
     float *f = out;
     f[0] = p->qx; f[1] = p->qy;      // quat xyz at +0x00
     f[2] = p->qz; f[3] = p->qw;      // quat w at +0x0c
-    f[4] = p->px; f[5] = p->py;      // position at +0x10
-    f[6] = p->pz;
+    f[4] = p->px; f[5] = p->py; f[6] = p->pz;       // position at +0x10
         // Velocity at +0x1c and angular velocity at +0x34, both of which were left
     // zero until now. libunity copies all four vectors straight into its XR
     // node state, so a zero here is not "unknown", it is "not moving" — and
@@ -4279,6 +4619,7 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
     // estimate off a 90 Hz pose stream is noise wearing a physical name.
     f[7]  = p->vx;  f[8]  = p->vy;  f[9]  = p->vz;
     f[13] = p->avx; f[14] = p->avy; f[15] = p->avz;
+    klovrp_eyelevel_apply(f);        // EyeLevel guests only (see above)
     if (klovrp_pose_time()) {
         int ix = klovrp_step_ix(step);
         double t = __atomic_load_n(&g_step_valid[ix], __ATOMIC_ACQUIRE)
@@ -7650,6 +7991,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_Initialize5",   (void *)klovrp_Initialize5},
     {"ovrp_Initialize6",   (void *)klovrp_Initialize6},
     {"ovrp_RecenterTrackingOrigin2", (void *)klovrp_RecenterTrackingOrigin2},
+    {"ovrp_RecenterTrackingOrigin", (void *)klovrp_RecenterTrackingOrigin},
     {"ovrp_GetAudioOutId2",       (void *)klovrp_GetAudioOutId2},
     {"ovrp_GetAudioInId2",        (void *)klovrp_GetAudioInId2},
     {"ovrp_GetDisplayAdapterId2", (void *)klovrp_GetDisplayAdapterId2},
@@ -7933,7 +8275,6 @@ static const char *const g_ovrp_result_ok[] = {
     // implementations above — they answer the same ovrpSuccess, but they are
     // where the timewarp bookkeeping is latched.
     "ovrp_EndEye2",
-    "ovrp_RecenterTrackingOrigin",
     // Thread-scheduling hints from PlayerSettings, set once at init; void
     // configuration like the setters above.
     "ovrp_AutoThreadScheduling", "ovrp_SetThreadPerformance",

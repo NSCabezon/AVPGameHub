@@ -32,6 +32,7 @@
 //     transcribed from the specification, and anything we have not transcribed
 //     is a refusal rather than a partly-populated struct.
 #include <stdio.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -1424,7 +1425,15 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
 static XrResult klxr_EnumerateViewConfigurationViews(
         void *instance, XrSystemId system_id, int32_t view_config_type,
         uint32_t capacity, uint32_t *count_out, XrViewConfigurationView *views) {
-    fprintf(stderr, "  [xr] >> %s\n", "xrEnumerateViewConfigurationViews");
+    // UE's OpenXR plugin asks for the view configuration every frame (twice:
+    // count, then fill). The entry is traced for the first few calls and the
+    // answer printed when it changes, not tens of thousands of times a session.
+    static int entry_said;
+    if (entry_said < 4) {
+        fprintf(stderr, "  [xr] >> %s%s\n", "xrEnumerateViewConfigurationViews",
+                entry_said == 3 ? "  (further calls silenced)" : "");
+        entry_said++;
+    }
     if (!klxr_inst(instance)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (system_id != KLXR_SYSTEM_ID) KLXR_RET(KLXR_ERROR_SYSTEM_INVALID);
     // Stereo is the only configuration we offer, and answering for mono would
@@ -1453,7 +1462,11 @@ static XrResult klxr_EnumerateViewConfigurationViews(
         views[i].recommendedSwapchainSampleCount = 1;
         views[i].maxSwapchainSampleCount = 4;
     }
-    fprintf(stderr, "  [xr] view configuration: 2 views, recommended %dx%d each\n", ew, eh);
+    static int said_w, said_h;
+    if (ew != said_w || eh != said_h) {
+        fprintf(stderr, "  [xr] view configuration: 2 views, recommended %dx%d each\n", ew, eh);
+        said_w = ew; said_h = eh;
+    }
     return KLXR_SUCCESS;
 }
 
@@ -4207,7 +4220,17 @@ typedef struct {
     uint32_t tex[KLXR_SWAPCHAIN_IMAGES];       // GLES: texture names
     uint64_t vk_img[KLXR_SWAPCHAIN_IMAGES];    // Vulkan: VkImage handles
     int      count;
-    int      acquired;        // index the app currently holds, -1 when none
+    // The images the app holds, oldest first, as the spec orders them: an app
+    // may acquire more than one before releasing (UE's OpenXR plugin keeps the
+    // NEXT frame's image acquired across frames: acquire at creation, then per
+    // frame wait / acquire-next / release), xrWaitSwapchainImage waits on the
+    // oldest acquired-but-not-waited image and xrReleaseSwapchainImage hands back
+    // the oldest WAITED one. `acquired` is the newest held index (-1 when none),
+    // kept for the trace line.
+    int      acquired;
+    int      held[KLXR_SWAPCHAIN_IMAGES];
+    int      n_held;          // acquired and not yet released
+    int      n_waited;        // ...of which the first n_waited have been waited on
     int      last_released;   // ...and the last one it handed BACK, which is the
                               // image it drew: by xrEndFrame the guest's own
                               // framebuffer may already point at the next one
@@ -5139,6 +5162,27 @@ static XrResult klxr_EnumerateSwapchainImages(void *swapchain, uint32_t capacity
     return KLXR_SUCCESS;
 }
 
+// KL_XR_SC_TRACE=N: the first N acquire/wait/release calls, one line each —
+// which swapchain, which thread, the state before, the result and the guest's
+// return address. The call ORDER across threads is the thing to read.
+static void klxr_sc_trace(const char *op, const klxr_swapchain *sc, int before, int r,
+                          const void *ret) {
+    static int budget = -1;
+    if (budget < 0) {
+        const char *e = getenv("KL_XR_SC_TRACE");
+        budget = e ? atoi(e) : 0;
+    }
+    if (budget <= 0) return;
+    budget--;
+    uint64_t tid = 0;
+    pthread_threadid_np(NULL, &tid);
+    size_t off = 0;
+    const char *img = kl_addr_image(ret, &off);
+    fprintf(stderr, "  [xr] sc-trace %-7s sc%d tid %llu held %d -> %d r=%d  from %s+0x%zx\n",
+            op, sc ? (int)(sc - g_swapchains) : -1, (unsigned long long)tid, before,
+            sc ? sc->acquired : -1, r, img ? img : "?", off);
+}
+
 // Acquire / wait / release. On a real runtime these are the actual
 // synchronisation with the compositor: acquire says which image is free, wait
 // blocks until the compositor has finished reading it, release hands it back.
@@ -5148,8 +5192,9 @@ static XrResult klxr_EnumerateSwapchainImages(void *swapchain, uint32_t capacity
 // consumer — so wait returns immediately. That is a correct answer for the
 // present arrangement rather than a stub for a missing one, but it is the line
 // that has to change the day the compositor samples an image the guest could
-// still be drawing into. The call ORDER is enforced, because a double-acquire
-// is a guest bug we would rather name than absorb.
+// still be drawing into. The call ORDER is enforced as the spec states it
+// (several images may be held; wait and release each take the oldest), because
+// an order the spec forbids is a guest bug we would rather name than absorb.
 static XrResult klxr_AcquireSwapchainImage(void *swapchain,
                                            const XrSwapchainImageAcquireInfo *info,
                                            uint32_t *index) {
@@ -5158,10 +5203,17 @@ static XrResult klxr_AcquireSwapchainImage(void *swapchain,
     if (!sc) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!index) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     if (info) klxr_log_chain("xrAcquireSwapchainImage", info->next);
-    if (sc->acquired >= 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    int before = sc->acquired;
+    // Every image already held: the spec's answer is CALL_ORDER_INVALID.
+    if (sc->n_held >= sc->count) {
+        klxr_sc_trace("acquire", sc, before, KLXR_ERROR_CALL_ORDER_INVALID, __builtin_return_address(0));
+        KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    }
     sc->acquired = sc->next_index;
+    sc->held[sc->n_held++] = sc->acquired;
     sc->next_index = (sc->next_index + 1) % sc->count;
     *index = (uint32_t)sc->acquired;
+    klxr_sc_trace("acquire", sc, before, KLXR_SUCCESS, __builtin_return_address(0));
     return KLXR_SUCCESS;
 }
 
@@ -5171,7 +5223,12 @@ static XrResult klxr_WaitSwapchainImage(void *swapchain,
     klxr_swapchain *sc = klxr_swapchain_of(swapchain);
     if (!sc) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (info) klxr_log_chain("xrWaitSwapchainImage", info->next);
-    if (sc->acquired < 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    // Waits on the oldest acquired image not yet waited on; none is an error.
+    int bad = sc->n_waited >= sc->n_held;
+    klxr_sc_trace("wait", sc, sc->acquired, bad ? KLXR_ERROR_CALL_ORDER_INVALID : 0,
+                  __builtin_return_address(0));
+    if (bad) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    sc->n_waited++;
     return KLXR_SUCCESS;
 }
 
@@ -5181,9 +5238,32 @@ static XrResult klxr_ReleaseSwapchainImage(void *swapchain,
     klxr_swapchain *sc = klxr_swapchain_of(swapchain);
     if (!sc) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (info) klxr_log_chain("xrReleaseSwapchainImage", info->next);
-    if (sc->acquired < 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
-    sc->last_released = sc->acquired;
-    sc->acquired = -1;
+    int before = sc->acquired;
+    // Releases the oldest WAITED image — which for UE is the one acquired a
+    // frame earlier and drawn this frame, not the one it just acquired. Getting
+    // this wrong (releasing the newest) published the image UE was about to
+    // draw into, and the compositor showed a half-drawn frame: the whole-view
+    // flicker in Metro's menus.
+    if (sc->n_held <= 0) {
+        klxr_sc_trace("release", sc, before, KLXR_ERROR_CALL_ORDER_INVALID, __builtin_return_address(0));
+        KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    }
+    // Release without a wait is out of order by the spec, but this runtime
+    // always let it through (wait has nothing to block on here), and a guest
+    // that skips the wait has been working; keep it working, and say so once.
+    if (sc->n_waited <= 0) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [xr] xrReleaseSwapchainImage before xrWaitSwapchainImage — "
+                            "tolerated (released the oldest acquired image)\n");
+        sc->n_waited = 1;
+    }
+    sc->last_released = sc->held[0];
+    for (int i = 1; i < sc->n_held; i++) sc->held[i - 1] = sc->held[i];
+    sc->n_held--;
+    sc->n_waited--;
+    if (sc->n_held == 0) sc->acquired = -1;
+    klxr_sc_trace("release", sc, before, KLXR_SUCCESS, __builtin_return_address(0));
     return KLXR_SUCCESS;
 }
 
@@ -7264,6 +7344,55 @@ static void klxr_st_sync(void) {
     si.type = XR_TYPE_ACTIONS_SYNC_INFO;
     klxr_SyncActions(&g_session, &si);
 }
+
+int kl_openxr_swapchain_selftest(FILE *f) {
+    int ok = 1;
+    klxr_swapchain *sc = NULL;
+    for (int i = 0; i < KLXR_SWAPCHAIN_MAX; i++)
+        if (!g_swapchains[i].magic) { sc = &g_swapchains[i]; break; }
+    if (!sc) { fprintf(f, "  no free swapchain slot\n"); return 0; }
+    memset(sc, 0, sizeof *sc);
+    sc->magic = KLXR_MAGIC_SWAPCHAIN;
+    sc->count = KLXR_SWAPCHAIN_IMAGES;
+    sc->acquired = sc->last_released = -1;
+    uint32_t idx = 99;
+#define SC_EXPECT(cond, what) do { if (!(cond)) { ok = 0; fprintf(f, "  FAIL: %s\n", what); } } while (0)
+    // Classic order: acquire, wait, release, three times round.
+    for (int k = 0; k < 4; k++) {
+        SC_EXPECT(klxr_AcquireSwapchainImage(sc, NULL, &idx) == KLXR_SUCCESS, "A/W/R acquire");
+        SC_EXPECT(klxr_WaitSwapchainImage(sc, NULL) == KLXR_SUCCESS, "A/W/R wait");
+        SC_EXPECT(klxr_ReleaseSwapchainImage(sc, NULL) == KLXR_SUCCESS, "A/W/R release");
+        SC_EXPECT(sc->last_released == (int)idx, "A/W/R releases the image it acquired");
+    }
+    // UE5: acquire at creation, then per frame wait / acquire-next / release.
+    uint32_t prev = 0;
+    SC_EXPECT(klxr_AcquireSwapchainImage(sc, NULL, &prev) == KLXR_SUCCESS, "UE pre-acquire");
+    for (int k = 0; k < 6; k++) {
+        SC_EXPECT(klxr_WaitSwapchainImage(sc, NULL) == KLXR_SUCCESS, "UE wait (held image)");
+        SC_EXPECT(klxr_AcquireSwapchainImage(sc, NULL, &idx) == KLXR_SUCCESS, "UE acquire-next while holding one");
+        SC_EXPECT(idx != prev, "UE next image differs from the held one");
+        SC_EXPECT(klxr_ReleaseSwapchainImage(sc, NULL) == KLXR_SUCCESS, "UE release");
+        SC_EXPECT(sc->last_released == (int)prev, "UE release hands back the WAITED image, not the new one");
+        prev = idx;
+    }
+    // Every image held: one more acquire is out of order; a wait with nothing
+    // un-waited is too.
+    SC_EXPECT(klxr_AcquireSwapchainImage(sc, NULL, &idx) == KLXR_SUCCESS, "fill 2");
+    SC_EXPECT(klxr_AcquireSwapchainImage(sc, NULL, &idx) == KLXR_SUCCESS, "fill 3");
+    SC_EXPECT(klxr_AcquireSwapchainImage(sc, NULL, &idx) == KLXR_ERROR_CALL_ORDER_INVALID,
+              "a fourth acquire with three held is refused");
+    for (int k = 0; k < 3; k++) SC_EXPECT(klxr_WaitSwapchainImage(sc, NULL) == KLXR_SUCCESS, "drain wait");
+    SC_EXPECT(klxr_WaitSwapchainImage(sc, NULL) == KLXR_ERROR_CALL_ORDER_INVALID,
+              "a wait with nothing un-waited is refused");
+    for (int k = 0; k < 3; k++) SC_EXPECT(klxr_ReleaseSwapchainImage(sc, NULL) == KLXR_SUCCESS, "drain release");
+    SC_EXPECT(klxr_ReleaseSwapchainImage(sc, NULL) == KLXR_ERROR_CALL_ORDER_INVALID,
+              "a release with nothing held is refused");
+#undef SC_EXPECT
+    memset(sc, 0, sizeof *sc);
+    fprintf(f, "  swapchain order: %s\n", ok ? "ok" : "FAILED");
+    return ok;
+}
+
 
 int kl_openxr_input_selftest(FILE *f) {
     int ok = 1;

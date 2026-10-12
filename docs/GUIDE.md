@@ -4,58 +4,185 @@ Everything the [README](../README.md) leaves out.
 
 ## Requirements
 
-- An Apple silicon Mac with Xcode and the visionOS SDK.
-- An Apple Developer account. A **paid** account is strongly recommended: the hub uses the
-  *Increased Memory Limit* and *Extended Virtual Addressing* capabilities (explicit App ID), and
-  installs last a year instead of seven days.
-- Apple Vision Pro.
+- An Apple silicon Mac with **Xcode** and its visionOS SDK (Xcode › Settings › Components ›
+  visionOS). The author builds with Xcode 27.0 on macOS 27; upstream Klepton documents Xcode 26.
+- [Homebrew](https://brew.sh) tools: `brew install pkg-config sdl3 apktool`.
+- Disk: ~25 GB for the toolchain (ANGLE alone takes 14–20 GB), plus each game's files on the Mac
+  (0.1–1.2 GB per game, see below). Game data proper downloads on the headset, not the Mac.
+- An Apple Developer account, signed in to Xcode. A **paid** team is needed for the
+  *Increased Memory Limit* and *Extended Virtual Addressing* capabilities the hub asks for
+  (explicit App ID), and installs last a year instead of seven days. A free team cannot sign those
+  capabilities: `KLEPTON_ENTITLEMENTS=0` builds without them, and the bigger games will then be
+  killed for memory.
+- Apple Vision Pro in Developer Mode, paired with the Mac (Setup, step 2).
 - PlayStation VR2 Sense controllers (paired to the Vision Pro). Hand tracking covers menus, not
   gameplay.
 - The games, bought on your own Steam and/or Meta account.
 
 ## Setup
 
-1. Clone, then create your local folder (gitignored, never committed):
+1. **Xcode.** Install it, add the visionOS platform (Settings › Components), and sign in under
+   **Xcode › Settings › Accounts**. Signing in creates the *Apple Development* certificate the
+   build reads your team id from; without it a device build stops with "no signing team".
+
+2. **Vision Pro.** On the headset, pair it with the Mac: **Settings › General › Remote Devices**,
+   then on the Mac open **Xcode › Window › Devices and Simulators**, select the Vision Pro and
+   enter the code it shows. Turn on **Developer Mode** on the headset (Settings › Privacy &
+   Security › Developer Mode; it appears once the headset has been paired) and restart when asked.
+   Keep it on the same Wi-Fi as the Mac.
+
+3. **Clone and configure.**
 
    ```bash
    git clone https://github.com/NSCabezon/AVPGameHub.git && cd AVPGameHub
-   mkdir -p local/{apks,game,foz,tools}
    cp local/config.env.example local/config.env
    ```
 
+   Then edit `local/config.env` and set **`KLEPTON_BUNDLE_ID`** to an id under your own reverse
+   domain, for example `com.jdoe.avpgamehub` (`com.example.*` and `com.yourname.*` are refused).
+   Keep it once you have installed: the game data lives in that app's container, and a new id
+   means downloading everything again. `KLEPTON_TEAM` and `KLEPTON_DEVICE` are detected when left
+   empty.
+
+   `local/` is yours and gitignored:
+
    | `local/…` | What goes there |
    |---|---|
-   | `config.env` | `KLEPTON_TEAM` (team id), `KLEPTON_DEVICE` (headset UDID), `KLEPTON_BUNDLE_ID` (your hub's bundle id — required for device builds) |
-   | `apks/` | APKs you fetched for translation (`metastore fetch … --apk-only`) |
-   | `game/` | Linux game builds you downloaded for translation (Half-Life: Alyx binaries) |
-   | `foz/` | Recorded Vulkan pipeline caches (Fossilize) |
+   | `config.env` | `KLEPTON_BUNDLE_ID` (required), `KLEPTON_TEAM`, `KLEPTON_DEVICE`, optional `KLEPTON_HUB_GAMES` / `KLEPTON_LOW_LATENCY` (see the example file) |
+   | `game/` | Half-Life: Alyx's Linux build: `game/bin/` (Steam depot 546564) and `game/steamrt4-arm64/` (the Steam Linux Runtime 4, arm64) |
+   | `superhot/`, `metro/` | Steam downloads the SUPERHOT VR and Metro Awakening APKs come from (can be deleted once copied) |
    | `tools/` | Meta's `ovr-platform-util` (below) |
 
-   Team and device are detected when left empty. The bundle id is yours: pick one under your own
-   reverse domain (`com.yourname.avpgamehub`) and keep it — the game data lives in its container.
-   A device build with the placeholder stops with a clear error.
+   The APKs and their decoded trees go in `klepton/` itself (`klepton/<game>.apk`,
+   `klepton/<game>/`), which ignores them.
 
-2. Build the toolchain pieces Klepton needs (ANGLE, MoltenVK, Fossilize) — see
-   [`klepton/BUILDING.md`](../klepton/BUILDING.md).
-3. Build and install the hub on the headset:
+4. **Toolchain.** From the repository root:
 
    ```bash
-   klepton/build_run_vpro.sh hub
+   cd klepton
+   make angle-xros angle-xrsim   # ANGLE for visionOS: 14–20 GB of disk, an hour or more the first time
+   make mvk                      # MoltenVK (Vulkan games: Half-Life: Alyx, Metro Awakening)
+   make fossilize                # optional: pipeline caches (Half-Life: Alyx's shader prewarm)
+   cd ..
    ```
 
-   or press **Build & Install** in the Mac app.
-4. On the headset, open **AVP Game Hub**, sign in to Steam and/or Meta, and download a game.
+   `make mvk` fetches the stock MoltenVK prebuilt. The Half-Life: Alyx numbers below were measured
+   with the foveating fork, `make mvk-fdm`, which builds MoltenVK from source (slower). More in
+   [`klepton/BUILDING.md`](../klepton/BUILDING.md); `make angle-all` also builds the host slice,
+   which only `make check` needs.
+
+5. **Game files** — for the games you want in this build: see
+   [Getting each game's files](#getting-each-games-files). You can skip this and build first: the
+   hub then carries no game yet, only the library.
+
+6. **Build and install** the hub on the headset (or press **Build & Install** in the Mac app):
+
+   ```bash
+   klepton/build_run_vpro.sh hub               # build, install, launch
+   klepton/build_run_vpro.sh hub --build-only  # build and sign only, no headset needed
+   ```
+
+   The first build registers the headset with your team. Keep the Vision Pro on, unlocked, awake
+   and on the same Wi-Fi as the Mac; if registration fails, the script says how to add the device
+   by hand.
+
+7. **On the headset**, open **AVP Game Hub**, sign in to Steam and/or Meta, and download a game.
+
+## Getting each game's files
+
+The Mac needs each game's **code** — its APK or Linux binaries — because the hub translates it at
+build time. The game **data** (gigabytes) downloads on the headset, from the hub, after you sign in.
+You need these files only for the games you want: **a build includes only the games whose files
+are on this Mac**; the others still appear in the hub's library as *Not included in this build*,
+and the build prints what each one is missing. Check before building with the Mac app's
+**Status**, or:
+
+```bash
+cd klepton && python3 visionos/targets.py --hub-check
+```
+
+`KLEPTON_HUB_GAMES=superhot,ktane` (environment or `local/config.env`) builds only those games;
+`KLEPTON_HUB_GAMES=none` builds the library alone.
+
+The commands below run from the repository root unless they say otherwise. Steam downloads use the
+SteamDepot command-line tool: the first run signs you in with a QR code (open the printed URL or
+pass `--qr-png /tmp/qr.png` and scan it with the Steam mobile app) or with `--user <your login>`;
+the token is kept in `~/.steamdepot-token.json`. Meta downloads use MetaStore, after
+`swift run metastore login` (it needs [Meta's tool](#metas-tool-never-committed)). The first
+`swift run` of each package compiles it (a few minutes).
+
+### Half-Life: Alyx (Steam)
+
+About 1.1 GB on the Mac. The Linux arm64 binaries (depot 546564), the Steam Linux Runtime 4 arm64
+they link against, then a host run that writes the list of libraries the build translates
+(`klepton/build/alyx_images.txt`):
+
+```bash
+(cd packages/SteamDepot && swift run -c release steamdepot --app 546560 --depot 546564 --dir ../../local/game/bin)
+
+mkdir -p local/game/steamrt4-arm64 && cd local/game/steamrt4-arm64
+curl -LO https://repo.steampowered.com/steamrt4/images/latest-public-beta/com.valvesoftware.SteamRuntime.Platform-arm64-steamrt4-runtime.tar.gz
+tar xzf com.valvesoftware.SteamRuntime.Platform-arm64-steamrt4-runtime.tar.gz && rm com.valvesoftware.SteamRuntime.Platform-arm64-steamrt4-runtime.tar.gz
+cd ../../../klepton && ./build_run_host.sh alyx --gap && cd ..
+```
+
+`local/game/` should then hold `bin/game/bin/linuxsteamrtarm64/hlvr` and
+`steamrt4-arm64/files/lib/aarch64-linux-gnu/`. The runtime is Valve's public Steam Runtime 4 image;
+the author used the `latest-public-beta` build 4.0.20260928.262390 — if a newer one fails, look
+for that build under `https://repo.steampowered.com/steamrt4/images/`. The `--gap` run needs
+`pkg-config` and `sdl3` (Homebrew). The 72 GB of game content is downloaded by the hub.
+
+### SUPERHOT VR (Steam)
+
+The port is built from the Steam Frame build (app 617830, depot 617833, `shvr.apk`, ~650 MB;
+~700 MB decoded). Meta's Quest build is a different APK: the hub lists Meta as a source but only
+installs from the store whose build matches the port.
+
+```bash
+(cd packages/SteamDepot && swift run -c release steamdepot --app 617830 --depot 617833 --filter shvr.apk --dir ../../local/superhot)
+cp local/superhot/shvr.apk klepton/superhot.apk
+cd klepton && apktool d -f -o superhot superhot.apk && cd ..
+```
+
+### Meta games: Beat Saber, Batman: Arkham Shadow, I Expect You To Die, Keep Talking and Nobody Explodes
+
+One APK each, fetched from your Meta account (`--apk-only`: no OBBs, no data). Recipes and sizes
+(APK / decoded): `beatsaber` (55 MB / 165 MB), `batman` (76 MB / 250 MB), `ieytd` (533 MB /
+1.2 GB), `ktane` (150 MB / 220 MB). For each game `<g>` you own:
+
+```bash
+(cd packages/MetaStore && swift run metastore fetch <g> --apk-only --out ../../klepton/<g>.apk)
+apktool d -f -o klepton/<g> klepton/<g>.apk
+```
+
+Beat Saber: the port was tested with 1.40.4; Meta currently sells 1.40.8, which is what `fetch`
+downloads, and it is not yet tested.
+
+### Metro Awakening (Steam)
+
+The Steam Frame build (app 2669410, depot 2669412). Only its APK is needed on the Mac (50 MB;
+the 19 GB of OBBs download on the headset):
+
+```bash
+(cd packages/SteamDepot && swift run -c release steamdepot --app 2669410 --depot 2669412 --filter Impact-Android-Shipping-arm64.apk --dir ../../local/metro)
+cp local/metro/Impact-Android-Shipping-arm64.apk klepton/metro.apk
+cd klepton && apktool d -f -o metro metro.apk && cd ..
+```
+
+Then build again (Setup, step 6): the new games are translated and included.
 
 ### Meta's tool (never committed)
 
-Meta sign-in uses Meta's own command-line tool, `ovr-platform-util` (macOS, arm64, signed by
-Meta's team `HXH6UQBHD4`). It is proprietary, so it is not in this repository and must never be
-committed:
+Meta sign-in uses Meta's own command-line tool, `ovr-platform-util` (macOS, signed by Meta's team
+`HXH6UQBHD4`). It is proprietary, so it is not in this repository and must never be committed.
+Either:
 
-1. Download it from
-   [Meta's Platform Command Line Utility page](https://developers.meta.com/horizon/resources/publish-reference-platform-command-line-utility/).
-2. Put it in `local/tools/ovr-platform-util`.
-3. `apps/macos/scripts/make-app.sh` bundles it into the Mac app, after checking Meta's signature.
+- in the Mac app, **Status › Get Meta's tool** opens
+  [Meta's download page](https://developers.meta.com/horizon/resources/publish-reference-platform-command-line-utility/)
+  and picks the file up from `~/Downloads` once it lands; or
+- download it yourself and put it in `local/tools/ovr-platform-util`;
+  `apps/macos/scripts/make-app.sh` then bundles it into the Mac app, after checking Meta's
+  signature, and `swift run metastore login --tool ../../local/tools/ovr-platform-util` uses it.
 
 ## Mac companion app
 
@@ -66,7 +193,8 @@ cd apps/macos && scripts/make-app.sh && open "build/AVP Game Hub.app"
 ```
 
 - **Status**: checks Xcode, the visionOS SDK, the Klepton toolchain pieces, signing team,
-  headset and bundle id, and says how to fix what is missing.
+  headset, bundle id and which games' files are on this Mac (and what the others are missing),
+  and says how to fix what is missing.
 - **Accounts**: Steam (QR or password, token on this Mac) and Meta. **Meta sign-in**: your e-mail,
   password and one-time code go only to Meta's tool; the token is stored in your Keychain and
   **Send to headset** copies it into the hub's container once. Meta's API used here is unofficial:
@@ -77,6 +205,19 @@ cd apps/macos && scripts/make-app.sh && open "build/AVP Game Hub.app"
 
 The command-line tools are in the packages: `swift run steamdepot …` in `packages/SteamDepot` and
 `swift run metastore …` in `packages/MetaStore`.
+
+## Troubleshooting the build
+
+- **"no signing team"**: sign in under Xcode › Settings › Accounts (that creates the Apple
+  Development certificate), or set `KLEPTON_TEAM` in `local/config.env`.
+- **"bundle id is '…'"**: set your own `KLEPTON_BUNDLE_ID` in `local/config.env`.
+- **"hub: N game(s) left out of this build"**: not an error — those games' files are not on this
+  Mac; the message names what is missing and the command that gets it.
+- **Signing fails on an entitlement** ("doesn't include the … entitlement"): the memory
+  capabilities need a paid team; `KLEPTON_ENTITLEMENTS=0` builds without any. The
+  `low-latency-streaming` entitlement is off unless you set `KLEPTON_LOW_LATENCY=1`.
+- **"the Apple team has no device registered yet"**: the first build registers the headset; keep
+  it awake, unlocked and on the same Wi-Fi, then run the build again.
 
 ## On the headset
 
@@ -132,7 +273,7 @@ games with an ARM64 build can run natively.
 |---|---|---|
 | Half-Life: Alyx | Linux arm64 (Steam Frame) | ✅ works |
 | SUPERHOT VR | Android arm64 (Steam Frame) | ✅ works |
-| Metro Awakening | Unreal Engine, Android | not tested (high effort) |
+| Metro Awakening | Unreal Engine, Android | in the hub; being tested on the headset |
 | VVVVVV | flat 2D | not tested |
 | Teenage Mutant Ninja Turtles: Shredder's Revenge | flat 2D | not tested |
 | FEZ | flat 2D | not tested |
@@ -154,7 +295,7 @@ Of Valve's Source titles, only Half-Life: Alyx ships an ARM64 build.
 - **Steam Frame**: more ARM64 titles from the candidates table.
 - **More stores**: SideQuest; itch.io (via `butler`); Pico.
 - **Open-source ports with your own data** from Steam/GOG (for example Doom 3 via Doom3Quest).
-- **Streaming from the Mac** for games with no ARM64 build.
+- **Streaming from the Mac** for games with no ARM64 build (an experimental *Play from Mac* exists).
 - **PS VR games** through an emulator plus streaming (for example Astro Bot).
 - Google Play: looked at and discarded.
 
@@ -185,6 +326,6 @@ packages/SteamDepot Steam client: sign-in, ownership, depot downloads, cloud sav
 packages/MetaStore  Meta store client: sign-in via Meta's tool, ownership, verified downloads
 docs/               design notes and audits
 site/               the GitHub Pages landing page
-local/              yours only, gitignored (config, tools, APKs, game data)
+local/              yours only, gitignored (config, Meta's tool, game files for building)
 ```
 

@@ -59,8 +59,8 @@
   capability database simply is not a greppable file. It is listed here as
   unverified rather than as confirmed.
 
-  Because it is unverified it is FILTERABLE: gen_xcodeproj.py drops it when
-  KLEPTON_LOW_LATENCY=0, writing a generated copy. That exists for exactly the
+  Because it is unverified it is FILTERABLE: gen_xcodeproj.py drops it unless
+  KLEPTON_LOW_LATENCY=1 (AVP Game Hub's default is off), writing a generated copy. That exists for exactly the
   failure the multicast section above describes — attaching a key the App ID
   has not been granted, or that the platform does not recognise, fails the
   whole signing step and takes the two memory keys with it. One knob, and the

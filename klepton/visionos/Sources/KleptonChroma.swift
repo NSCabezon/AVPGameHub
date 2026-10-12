@@ -247,7 +247,7 @@ enum KLGameLanguage: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .system: return "System"
+        case .system: return klL("System", "Sistema")
         case .en: return "English"
         case .es: return "Español"
         case .fr: return "Français"
@@ -335,7 +335,12 @@ enum KLGameSettingsStore {
     static let defaultFoveate = true
 
     /// Whether "Precompile graphics" applies (a Vulkan game with a pipeline list).
-    static func hasPrecompile(_ target: String) -> Bool { target == "alyx" }
+    static func hasPrecompile(_ target: String) -> Bool { target == "alyx" || target == "metro" }
+    /// ...and whether it is on when the player has not chosen. Metro (UE5) compiles
+    /// its pipelines on first use, ~300 ms each on M2, and has no list of its own:
+    /// on by default, the first session records what it compiles (klfz/recorded/)
+    /// and every later launch compiles that before the game starts.
+    static func defaultPrecompile(_ target: String) -> Bool { target == "metro" }
     /// The game's pipeline list, and the record of how it makes its Vulkan device
     /// (written by the runtime at the game's vkCreateDevice), in the game's
     /// container: Documents/games/<target>/klfz/ in the hub. Generated on the Mac
@@ -347,12 +352,20 @@ enum KLGameSettingsStore {
         fozDir(target).appendingPathComponent("\(target).foz")
     }
     static func precompileGraphics(for target: String) -> Bool {
-        hasPrecompile(target) && (load(target).precompileGraphics ?? false)
+        hasPrecompile(target) && (load(target).precompileGraphics ?? defaultPrecompile(target))
     }
-    /// The setting is on and the pipeline list is there: the boot window shows
+    /// Pipelines recorded on earlier sessions (KL_FOZ_AUTORECORD), which the
+    /// prewarm replays along with the list.
+    static func hasRecordedPipelines(_ target: String) -> Bool {
+        let rec = fozDir(target).appendingPathComponent("recorded", isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: rec.path)) ?? []
+        return names.contains { $0.hasSuffix(".foz") }
+    }
+    /// The setting is on and there is something to compile: the boot window shows
     /// "Preparing graphics… n/N" before the game starts.
     static func willPrecompile(_ target: String) -> Bool {
-        precompileGraphics(for: target) && FileManager.default.fileExists(atPath: fozURL(target).path)
+        precompileGraphics(for: target)
+            && (FileManager.default.fileExists(atPath: fozURL(target).path) || hasRecordedPipelines(target))
     }
 
     // Defaults. The hub's are "a VR game, fully": every hub game draws its own

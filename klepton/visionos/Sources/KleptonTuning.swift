@@ -257,12 +257,19 @@ struct TuningView: View {
 //
 // Applied at boot, because that is when the map is built; flipping the toggle
 // in a running session is recorded for the next one.
+//
+// PER GAME. Foveation and render resolution are stored per target
+// (`klepton.foveation.<target>`, `klepton.renderScale.<target>`, KLRenderPrefs),
+// each falling back to that game's own targets.py default while never chosen —
+// in the hub a value picked for one game used to leak into every other one.
 final class KleptonRendering: ObservableObject {
     static let shared = KleptonRendering()
-    private static let key = "klepton.foveation"
 
-    private static let scaleKey = "klepton.renderScale"
     private static let videoKey = "klepton.video"
+
+    /// The target these @Published values belong to (the old launcher's
+    /// RenderingView; a single-game build has one target for its whole life).
+    private let target: String
 
     /// Try in-game video even where the runtime would refuse it (a Vulkan
     /// guest — see klm_extractor_enabled). Starts at the target's own default.
@@ -280,14 +287,14 @@ final class KleptonRendering: ObservableObject {
         (Bundle.main.object(forInfoDictionaryKey: "KLVideoDefault") as? String) == "1"
 
     @Published var foveation: Bool {
-        didSet { UserDefaults.standard.set(foveation, forKey: Self.key) }
+        didSet { KLRenderPrefs.setFoveation(foveation, for: target) }
     }
 
     /// Fraction of the eye-texture size the guest is told, 0.5...1.0. See
     /// kl_ovrp_set_render_scale_default for why this and not foveation is the
     /// lever for a Vulkan guest.
     @Published var renderScale: Double {
-        didSet { UserDefaults.standard.set(renderScale, forKey: Self.scaleKey) }
+        didSet { KLRenderPrefs.setRenderScale(renderScale, for: target) }
     }
 
     /// The target's own default (targets.py "render_scale", baked into
@@ -299,35 +306,131 @@ final class KleptonRendering: ObservableObject {
     }()
 
     private init() {
-        // Never chosen means the target's default (targets.py "foveation",
-        // KLFoveationDefault in Info.plist), which is on unless the target
-        // says otherwise.
-        foveation = (UserDefaults.standard.object(forKey: Self.key) as? Bool)
-            ?? Self.targetFoveation
+        target = klTargetName()
+        foveation = KLRenderPrefs.foveation(for: target)
         // object(forKey:), so that "never chosen" is the target's default
         // rather than off.
         video = (UserDefaults.standard.object(forKey: Self.videoKey) as? Bool)
             ?? Self.targetVideo
-        // object(forKey:) rather than double(forKey:): 0 is "never set" there,
-        // and never set has to mean the target's default, not the minimum.
-        let stored = UserDefaults.standard.object(forKey: Self.scaleKey) as? Double
-        renderScale = stored.map { min(max($0, 0.5), 1.0) } ?? Self.targetRenderScale
+        renderScale = KLRenderPrefs.renderScale(for: target)
     }
 
     /// Hand the stored choice to the runtime. Before kl_app_boot, so every
     /// reader of kl_glfb_foveation_wanted sees one answer for the whole run.
+    /// Read from the store for the target selected NOW (in the hub, the game
+    /// Play picked), not from the @Published copies, which belong to whatever
+    /// target was current when this singleton was first touched.
     func apply() {
-        kl_glfb_set_foveation_default(foveation ? 1 : 0)
+        let t = klTargetName()
+        let fov = KLRenderPrefs.foveation(for: t)
+        kl_glfb_set_foveation_default(fov ? 1 : 0)
         let env = ProcessInfo.processInfo.environment["KL_VRR"]
-        NSLog("[cp] foveated rendering: setting \(foveation ? "on" : "off")"
+        NSLog("[cp] foveated rendering (\(t)): \(fov ? "on" : "off")"
+              + (KLRenderPrefs.storedFoveation(for: t) == nil ? " (game default)" : " (chosen)")
               + (env.map { " — overridden by KL_VRR=\($0)" } ?? ""))
-        kl_ovrp_set_render_scale_default(Float(renderScale))
+        let scale = KLRenderPrefs.renderScale(for: t)
+        let targetScale = KLRenderPrefs.defaultRenderScale(for: t)
+        kl_ovrp_set_render_scale_default(Float(scale))
         kl_mediandk_set_video_default(video ? 1 : -1)
         NSLog("[cp] in-game video: \(video ? "on" : "runtime default") (target default \(Self.targetVideo ? "on" : "off"))")
         let envScale = ProcessInfo.processInfo.environment["KL_OVRP_RENDER_SCALE"]
-        NSLog(String(format: "[cp] render resolution: setting %.0f%% (target default %.0f%%)",
-                     renderScale * 100, Self.targetRenderScale * 100)
+        NSLog(String(format: "[cp] render resolution (%@): setting %.0f%% (game default %.0f%%)",
+                     t, scale * 100, targetScale * 100)
               + (envScale.map { " — overridden by KL_OVRP_RENDER_SCALE=\($0)" } ?? ""))
+    }
+}
+
+/// Per-game foveation / render-resolution choices, in UserDefaults under
+/// `klepton.foveation.<target>` and `klepton.renderScale.<target>`. Absent =
+/// never chosen = the game's own default (its targets.py row: KLHubGameRow in
+/// the hub, Info.plist in a single-game build). Read at boot by
+/// KleptonRendering.apply; written by the hub's per-game "Graphics" section,
+/// the old launcher's RenderingView and the in-game quick settings. The env
+/// overrides (KL_VRR, KL_OVRP_RENDER_SCALE) still win in the runtime.
+enum KLRenderPrefs {
+    static let scaleRange: ClosedRange<Double> = 0.5 ... 1.0
+    private static let legacyFoveationKey = "klepton.foveation"
+    private static let legacyScaleKey = "klepton.renderScale"
+    static func foveationKey(_ t: String) -> String { "\(legacyFoveationKey).\(t)" }
+    static func scaleKey(_ t: String) -> String { "\(legacyScaleKey).\(t)" }
+
+    /// The pre-per-game GLOBAL keys, moved once: in the hub the value was set
+    /// for Half-Life: Alyx (the old launcher was the only place to set it), so
+    /// it goes to `alyx` only; a single-game build moves it to its own target.
+    /// A per-game value already there wins. Lazy static: runs once, thread-safe.
+    private static let migrated: Void = {
+        let d = UserDefaults.standard
+        #if KL_HUB
+        let to = "alyx"
+        #else
+        let to = klTargetName()
+        #endif
+        if let v = d.object(forKey: legacyFoveationKey) as? Bool {
+            if d.object(forKey: foveationKey(to)) == nil { d.set(v, forKey: foveationKey(to)) }
+            d.removeObject(forKey: legacyFoveationKey)
+            NSLog("[cp] render prefs: moved global foveation (\(v ? "on" : "off")) to \(to)")
+        }
+        if let v = d.object(forKey: legacyScaleKey) as? Double {
+            if d.object(forKey: scaleKey(to)) == nil { d.set(v, forKey: scaleKey(to)) }
+            d.removeObject(forKey: legacyScaleKey)
+            NSLog(String(format: "[cp] render prefs: moved global render scale %.2f to %@", v, to))
+        }
+    }()
+
+    static func defaultFoveation(for t: String) -> Bool {
+        #if KL_HUB
+        if let row = klHubGameRows.first(where: { $0.target == t }) { return row.foveation }
+        #endif
+        return KleptonRendering.targetFoveation
+    }
+
+    /// False for a Vulkan guest (targets.py "gl_foveation"): the GL rate map
+    /// does not reach it, so the setting is shown as unavailable.
+    static func glFoveation(for t: String) -> Bool {
+        #if KL_HUB
+        if let row = klHubGameRows.first(where: { $0.target == t }) { return row.glFoveation }
+        #endif
+        return true
+    }
+
+    static func defaultRenderScale(for t: String) -> Double {
+        #if KL_HUB
+        if let row = klHubGameRows.first(where: { $0.target == t }), scaleRange.contains(row.renderScale) {
+            return row.renderScale
+        }
+        #endif
+        return KleptonRendering.targetRenderScale
+    }
+
+    /// The chosen value, nil when never chosen.
+    static func storedFoveation(for t: String) -> Bool? {
+        _ = migrated
+        return UserDefaults.standard.object(forKey: foveationKey(t)) as? Bool
+    }
+
+    /// object(forKey:) rather than double(forKey:): 0 is "never set" there,
+    /// and never set has to mean the game's default, not the minimum.
+    static func storedRenderScale(for t: String) -> Double? {
+        _ = migrated
+        return (UserDefaults.standard.object(forKey: scaleKey(t)) as? Double)
+            .map { min(max($0, scaleRange.lowerBound), scaleRange.upperBound) }
+    }
+
+    static func foveation(for t: String) -> Bool { storedFoveation(for: t) ?? defaultFoveation(for: t) }
+    static func renderScale(for t: String) -> Double { storedRenderScale(for: t) ?? defaultRenderScale(for: t) }
+
+    /// nil forgets the choice (back to the game's default).
+    static func setFoveation(_ on: Bool?, for t: String) {
+        _ = migrated
+        if let on { UserDefaults.standard.set(on, forKey: foveationKey(t)) }
+        else { UserDefaults.standard.removeObject(forKey: foveationKey(t)) }
+    }
+
+    static func setRenderScale(_ v: Double?, for t: String) {
+        _ = migrated
+        if let v {
+            UserDefaults.standard.set(min(max(v, scaleRange.lowerBound), scaleRange.upperBound), forKey: scaleKey(t))
+        } else { UserDefaults.standard.removeObject(forKey: scaleKey(t)) }
     }
 }
 

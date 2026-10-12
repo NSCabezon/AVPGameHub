@@ -29,6 +29,15 @@ static struct {
     const char       *(*class_get_name)(Il2CppClass *);
     void             *(*class_get_type)(Il2CppClass *);
     Il2CppObject     *(*type_get_object)(void *);
+    // Optional (KL_PROBE_FIELDS only): absent ones disable that probe alone.
+    void             *(*class_get_field_from_name)(Il2CppClass *, const char *);
+    Il2CppClass      *(*class_get_parent)(Il2CppClass *);
+    size_t            (*field_get_offset)(void *);
+    void              (*field_static_get_value)(void *, void *);
+    void             *(*field_get_type)(void *);
+    int               (*type_get_type)(void *);
+    const char       *(*class_get_namespace)(Il2CppClass *);
+    void             *(*method_get_return_type)(const MethodInfo *);
 } il;
 
 // Managed object layouts (v24 / Unity 2019.4, LP64). Only the fields read here.
@@ -65,6 +74,14 @@ static int mprobe_init(void) {
     BIND(class_get_type,            "il2cpp_class_get_type");
     BIND(type_get_object,           "il2cpp_type_get_object");
 #undef BIND
+    *(void **)&il.class_get_field_from_name = kl_sym(img, "il2cpp_class_get_field_from_name");
+    *(void **)&il.class_get_parent          = kl_sym(img, "il2cpp_class_get_parent");
+    *(void **)&il.field_get_offset          = kl_sym(img, "il2cpp_field_get_offset");
+    *(void **)&il.field_static_get_value    = kl_sym(img, "il2cpp_field_static_get_value");
+    *(void **)&il.field_get_type            = kl_sym(img, "il2cpp_field_get_type");
+    *(void **)&il.type_get_type             = kl_sym(img, "il2cpp_type_get_type");
+    *(void **)&il.class_get_namespace       = kl_sym(img, "il2cpp_class_get_namespace");
+    *(void **)&il.method_get_return_type    = kl_sym(img, "il2cpp_method_get_return_type");
     g_state = 1;
     return 1;
 }
@@ -83,6 +100,40 @@ static Il2CppClass *find_class(const char *ns, const char *name) {
         if (!im) continue;
         Il2CppClass *k = il.class_from_name(im, ns, name);
         if (k) return k;
+    }
+    // A name given with no namespace ("*.Name" or a bare name the global
+    // namespace does not have) is searched for in every namespace: a title's
+    // own types sit under namespaces nothing outside its metadata names, and
+    // the probe is how those names are found in the first place.
+    if (ns[0] && strcmp(ns, "*")) return NULL;
+    // Remembered: the static probe asks again every tick, and a scan of every
+    // class in every image is not something to repeat ten times a second.
+    static struct { char name[96]; Il2CppClass *k; } cache[32];
+    static unsigned ncache;
+    for (unsigned i = 0; i < ncache; i++)
+        if (!strcmp(cache[i].name, name)) return cache[i].k;
+    kl_image *img = kl_find_image("libil2cpp.so");
+    size_t (*count)(const Il2CppImage *) =
+        img ? (size_t (*)(const Il2CppImage *))kl_sym(img, "il2cpp_image_get_class_count") : NULL;
+    Il2CppClass *(*get)(const Il2CppImage *, size_t) =
+        img ? (Il2CppClass *(*)(const Il2CppImage *, size_t))kl_sym(img, "il2cpp_image_get_class") : NULL;
+    if (!count || !get) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        const Il2CppImage *im = il.assembly_get_image(as[i]);
+        if (!im) continue;
+        size_t c = count(im);
+        for (size_t j = 0; j < c; j++) {
+            Il2CppClass *k = get(im, j);
+            if (k && !strcmp(il.class_get_name(k), name)) {
+                fprintf(stderr, "  [mprobe] %s is %s.%s\n", name,
+                        il.class_get_namespace ? il.class_get_namespace(k) : "?", name);
+                if (ncache < 32) {
+                    snprintf(cache[ncache].name, sizeof cache[0].name, "%s", name);
+                    cache[ncache++].k = k;
+                }
+                return k;
+            }
+        }
     }
     return NULL;
 }
@@ -656,6 +707,387 @@ static void mprobe_resolve_offsets(void) {
     }
 }
 
+// ---- KL_PROBE_STATIC: follow a chain of fields from a static ---------------
+//
+//   KL_PROBE_STATIC="Ns.Type:staticField.field.field,..."
+//
+// (Was KL_PROBE_FIELDS on the ieytd branch; renamed when alyx gained its own
+// KL_PROBE_FIELDS for live components.)
+//
+// Reads the static, then each instance field in turn (searching base classes
+// too, so private fields of a parent resolve). A step written `name()` CALLS
+// that zero-argument method instead (static at the first step, so
+// `UnityEngine.Camera:get_main().get_cullingMask()` reads an engine property
+// no field holds). It then prints where the chain
+// ends: a reference prints its runtime CLASS, a value type its first four
+// bytes as int and float. Built for IEYTD, whose GameManager is a state machine
+// (`GameManager:_instance._fsm...`): which state a black-screened title is
+// sitting in is the first question, and nothing native can answer it.
+static void *probe_field_of(Il2CppClass *k, const char *name) {
+    for (; k; k = il.class_get_parent ? il.class_get_parent(k) : NULL) {
+        void *f = il.class_get_field_from_name(k, name);
+        if (f) return f;
+        if (!il.class_get_parent) break;
+    }
+    return NULL;
+}
+
+static int probe_type_is_ref(void *f) {
+    int t = il.type_get_type(il.field_get_type(f));
+    // STRING, CLASS, SZARRAY, OBJECT, ARRAY, GENERICINST-of-class (0x15 is
+    // ambiguous; treated as a reference — the generic value types this is
+    // pointed at are rare, and the class name printed says which it was).
+    return t == 0x0e || t == 0x12 || t == 0x14 || t == 0x15 || t == 0x1c || t == 0x1d;
+}
+
+// The component of class `k` on the scene object at `path` (GameObject.Find
+// syntax), or NULL. Shared by KL_PROBE_FIELDS and KL_PROBE_STATIC's '@' form.
+static Il2CppObject *probe_scene_component(const char *path, Il2CppClass *k) {
+    kl_image *img = kl_find_image("libil2cpp.so");
+    static const MethodInfo *m_find, *m_getc;
+    static int resolved;
+    if (!resolved && img) {
+        resolved = 1;
+        typedef const MethodInfo *(*get_methods_fn)(Il2CppClass *, void **);
+        typedef const char *(*m_name_fn)(const MethodInfo *);
+        typedef uint32_t (*m_argc_fn)(const MethodInfo *);
+        typedef const void *(*m_param_fn)(const MethodInfo *, uint32_t);
+        typedef char *(*t_name_fn)(const void *);
+        m_find = find_method("UnityEngine", "GameObject", "Find", 1);
+        get_methods_fn get_methods = (get_methods_fn)kl_sym(img, "il2cpp_class_get_methods");
+        m_name_fn      m_name      = (m_name_fn)kl_sym(img, "il2cpp_method_get_name");
+        m_argc_fn      m_argc      = (m_argc_fn)kl_sym(img, "il2cpp_method_get_param_count");
+        m_param_fn     m_param     = (m_param_fn)kl_sym(img, "il2cpp_method_get_param");
+        t_name_fn      t_name      = (t_name_fn)kl_sym(img, "il2cpp_type_get_name");
+        Il2CppClass *gok = find_class("UnityEngine", "GameObject");
+        void *it = NULL;
+        if (gok && get_methods && m_name && m_argc && m_param && t_name)
+            for (const MethodInfo *m; (m = get_methods(gok, &it)) != NULL; ) {
+                if (strcmp(m_name(m), "GetComponent") || m_argc(m) != 1) continue;
+                const void *t = m_param(m, 0);
+                if (t && !strcmp(t_name(t), "System.Type")) { m_getc = m; break; }
+            }
+    }
+    if (!m_find || !m_getc || !k) return NULL;
+    void *a0[1] = { il.string_new(path) };
+    Il2CppObject *go = invoke(m_find, a0, "GameObject.Find");
+    if (!go) return NULL;
+    void *a1[1] = { il.type_get_object(il.class_get_type(k)) };
+    return invoke_on(go, m_getc, a1, "GameObject.GetComponent");
+}
+
+static void probe_static_chain(unsigned frame) {
+    const char *spec = kl_env_str("KL_PROBE_STATIC", NULL);
+    if (!spec || !*spec) return;
+    if (!il.class_get_field_from_name || !il.field_get_offset ||
+        !il.field_static_get_value || !il.field_get_type || !il.type_get_type) {
+        fprintf(stderr, "  [mprobe] static: libil2cpp lacks the field API\n");
+        return;
+    }
+    // 8 KiB: a sweep over a list (one chain per element) outgrows 1 KiB fast,
+    // and a cut-off spec is a silently half-run probe.
+    char buf[8192];
+    if (snprintf(buf, sizeof buf, "%s", spec) >= (int)sizeof buf)
+        fprintf(stderr, "  [mprobe] static: KL_PROBE_STATIC longer than %zu bytes, "
+                        "truncated\n", sizeof buf - 1);
+    for (char *save = NULL, *it = strtok_r(buf, ",", &save); it;
+         it = strtok_r(NULL, ",", &save)) {
+        char *colon = strchr(it, ':');
+        if (!colon) continue;
+        *colon = 0;
+        char ns[160] = "", name[128] = "";
+        const char *dot = strrchr(it, '.');
+        if (dot) { snprintf(ns, sizeof ns, "%.*s", (int)(dot - it), it);
+                   snprintf(name, sizeof name, "%s", dot + 1); }
+        else       snprintf(name, sizeof name, "%s", it);
+        // "@<scene path>=<Class>:<chain>" starts from a live component instead
+        // of a static: the chain's first step is then an instance step.
+        const char *scene = NULL;
+        char sbuf[256];
+        if (it[0] == '@') {
+            char *eq = strchr(it, '=');
+            if (!eq) { fprintf(stderr, "  [mprobe] static: want @<path>=<Class>:<chain>\n"); continue; }
+            snprintf(sbuf, sizeof sbuf, "%.*s", (int)(eq - it - 1), it + 1);
+            scene = sbuf;
+            const char *cls = eq + 1;
+            dot = strrchr(cls, '.');
+            ns[0] = 0;
+            if (dot) { snprintf(ns, sizeof ns, "%.*s", (int)(dot - cls), cls);
+                       snprintf(name, sizeof name, "%s", dot + 1); }
+            else       snprintf(name, sizeof name, "%s", cls);
+        }
+        Il2CppClass *k = find_class(ns, name);
+        if (!k) { fprintf(stderr, "  [mprobe] static: no class %s\n", it); continue; }
+        char chain[512]; snprintf(chain, sizeof chain, "%s", colon + 1);
+        void *obj = NULL; uint8_t val[16] = {0}; int is_ref = 1, step = 0;
+        if (scene) {
+            obj = probe_scene_component(scene, k);
+            if (!obj) { fprintf(stderr, "  [mprobe f%u] %s: no such object/component\n", frame, it); continue; }
+            step = 1;      // every step below is an instance step
+        }
+        const char *fail = NULL;
+        for (char *s2 = NULL, *fn = strtok_r(chain, ".", &s2); fn;
+             fn = strtok_r(NULL, ".", &s2), step++) {
+            void *f;
+            size_t fl = strlen(fn);
+            if (fl > 2 && !strcmp(fn + fl - 2, "()")) {
+                // A getter: invoke it on the current object (static at step 0).
+                fn[fl - 2] = 0;
+                Il2CppClass *mk = step == 0 ? k
+                                : (is_ref && obj) ? il.object_get_class((Il2CppObject *)obj) : NULL;
+                const MethodInfo *m = NULL;
+                for (Il2CppClass *c = mk; c && !m;
+                     c = il.class_get_parent ? il.class_get_parent(c) : NULL) {
+                    m = il.class_get_method_from_name(c, fn, 0);
+                    if (!il.class_get_parent) break;
+                }
+                if (!m || !il.method_get_return_type) { fail = fn; break; }
+                Il2CppObject *r = invoke_on(step == 0 ? NULL : (Il2CppObject *)obj, m, NULL, fn);
+                int rt = il.type_get_type(il.method_get_return_type(m));
+                is_ref = rt == 0x0e || rt == 0x12 || rt == 0x14 || rt == 0x15 ||
+                         rt == 0x1c || rt == 0x1d;
+                if (is_ref) obj = r;
+                else { memset(val, 0, sizeof val);
+                       if (r) memcpy(val, il.object_unbox(r), 12); }
+                continue;
+            }
+            // `name[i]` takes element i of an array-of-references field (a
+            // step's condition entities, a list of steps); `[i]` alone indexes
+            // the array the chain is already on; `#` is its length.
+            char *lb = strchr(fn, '[');
+            long aidx = -1;
+            if (lb && fn[fl - 1] == ']') { aidx = strtol(lb + 1, NULL, 10); *lb = 0; }
+            if (!strcmp(fn, "#") || (aidx >= 0 && !*fn)) {
+                if (!is_ref || !obj) { fail = "[]"; break; }
+                uint32_t n = il.array_length((Il2CppObject *)obj);
+                if (!strcmp(fn, "#")) { is_ref = 0; memset(val, 0, sizeof val); memcpy(val, &n, 4); continue; }
+                if ((uint32_t)aidx >= n) { fail = "index"; break; }
+                obj = ((void **)((uint8_t *)obj + ARR_DATA))[aidx];
+                continue;
+            }
+            if (step == 0) {
+                f = probe_field_of(k, fn);
+                if (!f) { fail = fn; break; }
+                is_ref = probe_type_is_ref(f);
+                if (is_ref) il.field_static_get_value(f, &obj);
+                else        il.field_static_get_value(f, val);
+            } else {
+                if (!is_ref || !obj) { fail = fn; break; }
+                Il2CppClass *ok = il.object_get_class((Il2CppObject *)obj);
+                f = ok ? probe_field_of(ok, fn) : NULL;
+                if (!f) { fail = fn; break; }
+                size_t off = il.field_get_offset(f);
+                is_ref = probe_type_is_ref(f);
+                if (is_ref) memcpy(&obj, (uint8_t *)obj + off, sizeof obj);
+                else        memcpy(val, (uint8_t *)obj + off, sizeof val);
+            }
+            if (aidx >= 0) {
+                if (!is_ref || !obj) { fail = "[]"; break; }
+                uint32_t n = il.array_length((Il2CppObject *)obj);
+                if ((uint32_t)aidx >= n) { fail = "index"; break; }
+                obj = ((void **)((uint8_t *)obj + ARR_DATA))[aidx];
+            }
+        }
+        if (fail) {
+            fprintf(stderr, "  [mprobe f%u] %s:%s -> stopped at '%s' (%s)\n", frame,
+                    it, colon + 1, fail, obj || !is_ref ? "no such field" : "null");
+        } else if (is_ref) {
+            Il2CppClass *ok = obj ? il.object_get_class((Il2CppObject *)obj) : NULL;
+            // A UnityEngine.Object also says its NAME: "which GameObject is
+            // highlighted" is the question, and the class alone is GameObject.
+            char oname[96] = "";
+            const MethodInfo *gn = NULL;
+            for (Il2CppClass *c = ok; c && !gn; c = il.class_get_parent ? il.class_get_parent(c) : NULL) {
+                if (!strcmp(il.class_get_name(c), "Object") && il.class_get_namespace &&
+                    !strcmp(il.class_get_namespace(c), "UnityEngine"))
+                    gn = il.class_get_method_from_name(c, "get_name", 0);
+                if (!il.class_get_parent) break;
+            }
+            // A System.String says its VALUE: the class alone answers nothing,
+            // and the strings are what a script needs (KTANE's manual lock codes).
+            if (ok && !strcmp(il.class_get_name(ok), "String") && il.class_get_namespace &&
+                !strcmp(il.class_get_namespace(ok), "System")) {
+                oname[0] = ' '; oname[1] = '"'; str_ascii((Il2CppObject *)obj, oname + 2, sizeof oname - 4);
+                strlcat(oname, "\"", sizeof oname);
+            }
+            if (gn) {
+                Il2CppObject *ns2 = invoke_on((Il2CppObject *)obj, gn, NULL, "Object.name");
+                if (ns2) { oname[0] = ' '; oname[1] = '"'; str_ascii(ns2, oname + 2, sizeof oname - 4);
+                           strlcat(oname, "\"", sizeof oname); }
+            }
+            fprintf(stderr, "  [mprobe f%u] %s:%s = %s%s%s%s\n", frame, it, colon + 1,
+                    !obj ? "null" : (ok && il.class_get_namespace) ? il.class_get_namespace(ok) : "",
+                    ok && il.class_get_namespace && *il.class_get_namespace(ok) ? "." : "",
+                    ok ? il.class_get_name(ok) : "", oname);
+        } else {
+            // The first word as int and float, and three floats beside it for a
+            // Vector3-shaped answer (a getter's struct is unboxed 12 bytes deep;
+            // a field read copies 16, so the tail is whatever follows it).
+            int32_t i32; float f3[3]; memcpy(&i32, val, 4); memcpy(f3, val, 12);
+            fprintf(stderr, "  [mprobe f%u] %s:%s = %d (0x%x, %gf) [%g %g %g]\n",
+                    frame, it, colon + 1, i32, (unsigned)i32, (double)f3[0],
+                    (double)f3[0], (double)f3[1], (double)f3[2]);
+        }
+    }
+}
+
+// ---- KL_PROBE_TREE: the live scene hierarchy, filtered ----------------------
+//
+// Every other probe here needs a NAME to start from (a static, a scene path),
+// and the first question about an unfamiliar title is what the names are: which
+// object is the button the script has to touch, where it is in world space, and
+// whether the hands exist but sit under a switched-off parent. This walks every
+// root Transform (Object.FindObjectsOfType(Transform) only sees active ones, so
+// Resources.FindObjectsOfTypeAll is used and roots are those with no parent)
+// and prints each node whose NAME contains one of the filters, with its full
+// path: activeSelf/activeInHierarchy, world position and forward, and its
+// components' class names.
+//
+//   KL_PROBE_TREE="Done,Hand,/VRRig/,#Button"  ("*" prints everything to depth;
+//   a leading '/' matches the path, so "/Briefcase_01/" is a whole subtree;
+//   a leading '#' matches a component class name on an ACTIVE object)
+//   KL_PROBE_TREE_DEPTH=12  KL_PROBE_TREE_MAX=2 (times printed)
+//   KL_PROBE_TREE_FROM=<frame> (first tick to print at, default the probe's)
+//
+// Printed on the KL_PROBE_INPUT cadence. Diagnostic only.
+static struct {
+    const MethodInfo *all, *parent, *ccount, *child, *go, *name, *aself, *ahier,
+                     *pos, *comps, *fwd;
+    Il2CppObject *ttype, *ctype;
+    char filt[8][64]; int nfilt; int maxdepth; unsigned lines; int by_comp;
+} T;
+
+// A filter matches a node's NAME; one written with a leading '/' matches
+// anywhere in its PATH instead, which is how a whole subtree is asked for.
+static int tree_match(const char *name, const char *path) {
+    for (int i = 0; i < T.nfilt; i++) {
+        const char *f = T.filt[i];
+        if (!strcmp(f, "*")) return 1;
+        if (f[0] == '#') continue;
+        if (f[0] == '/' ? strstr(path, f) != NULL : strstr(name, f) != NULL) return 1;
+    }
+    return 0;
+}
+
+static void tree_name(Il2CppObject *o, char *out, size_t cap) {
+    Il2CppObject *s = invoke_on(o, T.name, NULL, "Object.name");
+    str_ascii(s, out, cap);
+}
+
+static int tree_bool(Il2CppObject *o, const MethodInfo *m) {
+    Il2CppObject *r = m ? invoke_on(o, m, NULL, "bool") : NULL;
+    return r ? *(uint8_t *)il.object_unbox(r) : -1;
+}
+
+// Prints every node whose own name matches, with its full path.
+static void tree_comps(Il2CppObject *g, char *comps, size_t cap) {
+    comps[0] = 0;
+    if (!g || !T.comps || !T.ctype) return;
+    uint8_t f0 = 0, f1 = 0;
+    void *a[6] = { T.ctype, &f0, &f0, &f1, &f0, NULL };
+    Il2CppObject *arr = invoke_on(g, T.comps, a, "GetComponentsInternal");
+    if (!arr) return;
+    uint32_t n = il.array_length(arr);
+    size_t o = 0;
+    for (uint32_t i = 0; i < n && i < 16 && o < cap; i++) {
+        Il2CppObject *c = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+        Il2CppClass *k = c ? il.object_get_class(c) : NULL;
+        o += (size_t)snprintf(comps + o, cap - o, "%s%s", i ? "," : "",
+                              k ? il.class_get_name(k) : "null");
+    }
+}
+
+static void tree_walk(Il2CppObject *t, const char *ppath, int depth) {
+    if (depth > T.maxdepth || T.lines > 4000) return;
+    char nm[96], path[768], comps[512] = "";
+    tree_name(t, nm, sizeof nm);
+    snprintf(path, sizeof path, "%s/%s", ppath, nm);
+    Il2CppObject *g = NULL;
+    int hit = tree_match(nm, path);
+    if (!hit && T.by_comp) {
+        // '#Name' filters match a component's class name; only an ACTIVE
+        // object is worth naming by what it carries.
+        g = invoke_on(t, T.go, NULL, "Component.gameObject");
+        if (g && tree_bool(g, T.ahier) == 1) {
+            tree_comps(g, comps, sizeof comps);
+            for (int i = 0; i < T.nfilt && !hit; i++)
+                if (T.filt[i][0] == '#' && strstr(comps, T.filt[i] + 1)) hit = 1;
+        }
+    }
+    if (hit) {
+        if (!g) g = invoke_on(t, T.go, NULL, "Component.gameObject");
+        float p[3] = {0}, f[3] = {0};
+        Il2CppObject *r = invoke_on(t, T.pos, NULL, "Transform.position");
+        if (r) memcpy(p, il.object_unbox(r), sizeof p);
+        if (T.fwd && (r = invoke_on(t, T.fwd, NULL, "Transform.forward")))
+            memcpy(f, il.object_unbox(r), sizeof f);
+        if (!comps[0]) tree_comps(g, comps, sizeof comps);
+        fprintf(stderr, "  [mprobe] tree %s self=%d hier=%d pos=(%.3f %.3f %.3f) fwd=(%.2f %.2f %.2f) [%s]\n",
+                path, g ? tree_bool(g, T.aself) : -1, g ? tree_bool(g, T.ahier) : -1,
+                p[0], p[1], p[2], f[0], f[1], f[2], comps);
+        T.lines++;
+    }
+    Il2CppObject *cr = invoke_on(t, T.ccount, NULL, "Transform.childCount");
+    int n = cr ? *(int32_t *)il.object_unbox(cr) : 0;
+    for (int i = 0; i < n; i++) {
+        void *a[1] = { &i };
+        Il2CppObject *c = invoke_on(t, T.child, a, "Transform.GetChild");
+        if (c) tree_walk(c, path, depth + 1);
+    }
+}
+
+static void probe_tree(unsigned frame) {
+    const char *spec = kl_env_str("KL_PROBE_TREE", NULL);
+    static unsigned printed, cap;
+    if (!spec || !*spec) return;
+    if (!cap) cap = kl_env_uint("KL_PROBE_TREE_MAX", 2u);
+    if (printed >= cap || frame < kl_env_uint("KL_PROBE_TREE_FROM", 0u)) return;
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        T.all    = find_method("UnityEngine", "Resources", "FindObjectsOfTypeAll", 1);
+        T.parent = find_method("UnityEngine", "Transform", "get_parent", 0);
+        T.ccount = find_method("UnityEngine", "Transform", "get_childCount", 0);
+        T.child  = find_method("UnityEngine", "Transform", "GetChild", 1);
+        T.pos    = find_method("UnityEngine", "Transform", "get_position", 0);
+        T.fwd    = find_method("UnityEngine", "Transform", "get_forward", 0);
+        T.go     = find_method("UnityEngine", "Component", "get_gameObject", 0);
+        T.name   = find_method("UnityEngine", "Object", "get_name", 0);
+        T.aself  = find_method("UnityEngine", "GameObject", "get_activeSelf", 0);
+        T.ahier  = find_method("UnityEngine", "GameObject", "get_activeInHierarchy", 0);
+        // GetComponents(Type) throws ExecutionEngineException on IEYTD (its
+        // AOT body was stripped); the internal call under it is a plain icall
+        // and survives: GetComponentsInternal(type, useSearchTypeAsArrayReturnType,
+        // recursive, includeInactive, reverse, resultList).
+        T.comps = find_method("UnityEngine", "GameObject", "GetComponentsInternal", 6);
+        Il2CppClass *tk = find_class("UnityEngine", "Transform");
+        Il2CppClass *ck = find_class("UnityEngine", "Component");
+        if (tk) T.ttype = il.type_get_object(il.class_get_type(tk));
+        if (ck) T.ctype = il.type_get_object(il.class_get_type(ck));
+        char buf[512]; snprintf(buf, sizeof buf, "%s", spec);
+        for (char *p = buf, *tok; (tok = strsep(&p, ",")) != NULL && T.nfilt < 8; )
+            if (*tok) {
+                if (*tok == '#') T.by_comp = 1;
+                snprintf(T.filt[T.nfilt++], sizeof T.filt[0], "%s", tok);
+            }
+        T.maxdepth = (int)kl_env_uint("KL_PROBE_TREE_DEPTH", 12u);
+    }
+    if (!T.all || !T.parent || !T.ccount || !T.child || !T.name || !T.ttype) return;
+    void *a[1] = { T.ttype };
+    Il2CppObject *arr = invoke(T.all, a, "Resources.FindObjectsOfTypeAll");
+    if (!arr) return;
+    printed++;
+    T.lines = 0;
+    uint32_t n = il.array_length(arr);
+    fprintf(stderr, "  [mprobe f%u] tree: %u transforms, filter \"%s\"\n", frame, n, spec);
+    for (uint32_t i = 0; i < n; i++) {
+        Il2CppObject *t = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+        if (!t || invoke_on(t, T.parent, NULL, "Transform.parent")) continue;
+        tree_walk(t, "", 0);
+    }
+    fprintf(stderr, "  [mprobe f%u] tree: end (%u lines)\n", frame, T.lines);
+}
+
 // ---- AC Nexus VR: the frame length the guest spins itself out to -------------
 //
 // Not a probe: the one place the runtime writes a managed value, kept here
@@ -774,6 +1206,8 @@ void kl_mprobe_tick(unsigned frame) {
     static int dumped_enums;
     if (!dumped_enums) { dumped_enums = 1; probe_dump_enums(); probe_dump_methods(); }
     probe_xform_path(frame);
+    probe_static_chain(frame);
+    probe_tree(frame);
     probe_fields(frame);
 
     // Input.GetJoystickNames and InputTracking.GetLocalPosition/Rotation are

@@ -1396,6 +1396,12 @@ int klb_sigprocmask(int how, const uint64_t *s, uint64_t *o) {
 }
 // bionic takes the thread; Darwin's only names the *current* thread.
 int klb_pthread_setname_np(pthread_t t, const char *nm) {
+    // KL_TRACE_THREADS: name the thread by the same id the fault report uses,
+    // so "a guest worker thread" in a fault becomes the engine's own name.
+    if (pthread_equal(t, pthread_self()) && kl_env_on("KL_TRACE_THREADS", 0)) {
+        uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+        fprintf(stderr, "  [thr] tid=%llu named \"%s\"\n", (unsigned long long)tid, nm ? nm : "");
+    }
     return pthread_equal(t, pthread_self()) ? pthread_setname_np(nm) : 0;
 }
 int klb_pthread_atfork(void (*p)(void), void (*c)(void), void (*ch)(void)) {

@@ -223,6 +223,17 @@ static int plat_is_checkout(const char *name) {
 // nothing this answers was ever for sale. Target-scoped on purpose: the same
 // call on another title can be asking about paid content.
 //
+// The game offers to download a pack it was told is "available", and its yes
+// is ovr_AssetFile_DownloadById — which, refused, aborted the whole session on
+// the headset (2026-10-12, Spanish system: es-ES). The hub now fetches the
+// headset language's pack (and en-US) from Meta with the player's own account,
+// so the question normally never comes up. When it does, the answer is again
+// the disk: a manifest pack that is there completes at once (the download
+// result, then the one progress notification a finished download ends with,
+// bytes = its real size); a manifest pack that is not there gets an ERROR
+// completion — nothing was fetched, and the game's own failure path says so —
+// and an id or name outside the manifest still refuses.
+//
 // AC Nexus VR (x5812519008825194) is the second, and asks differently: its
 // voice-over is one `<tag>.lang` Wwise package per language beside the rest of
 // its data in the OBB directory, part of the base game like batman's, and it
@@ -252,6 +263,20 @@ static int plat_is_langpack_status(const char *name) {
         "ovr_AssetDetails_GetDownloadStatus", "ovr_AssetDetails_GetFilepath",
         "ovr_AssetDetails_GetIapStatus",     "ovr_AssetDetails_GetLanguage",
         "ovr_AssetDetails_GetMetadata",
+        // A download of a pack, answered from the disk (klplat_langpack_Download):
+        // a pack already there completes, any other manifest pack gets an error
+        // completion, and a name/id outside the manifest still refuses.
+        "ovr_AssetFile_DownloadById",   "ovr_AssetFile_DownloadByName",
+        "ovr_AssetFile_DownloadByName_Native",
+        "ovr_Message_GetAssetFileDownloadResult",
+        "ovr_AssetFileDownloadResult_GetAssetId", "ovr_AssetFileDownloadResult_GetFilepath",
+        "ovr_AssetFileDownloadResult_GetFilepath_Native",
+        "ovr_Message_GetAssetFileDownloadUpdate",
+        "ovr_AssetFileDownloadUpdate_GetAssetFileId", "ovr_AssetFileDownloadUpdate_GetAssetId",
+        "ovr_AssetFileDownloadUpdate_GetBytesTotal", "ovr_AssetFileDownloadUpdate_GetBytesTotalLong",
+        "ovr_AssetFileDownloadUpdate_GetBytesTransferred",
+        "ovr_AssetFileDownloadUpdate_GetBytesTransferredLong",
+        "ovr_AssetFileDownloadUpdate_GetCompleted",
     };
     if (!plat_is_langpack_target()) return 0;
     for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++)
@@ -369,6 +394,11 @@ static uint64_t klplat_called(const char *name) {
 // Queued only for that title — another game's enum is not these numbers.
 #define KLPLAT_MSG_ASSET_STATUS_ID    1570069816u  // AssetFile_StatusById
 #define KLPLAT_MSG_ASSET_STATUS_NAME  1104140880u  // AssetFile_StatusByName
+// batman's own, from its global-metadata default-value blob (the same read finds
+// the two above beside them): a pack download, and the notification it ends with.
+#define KLPLAT_MSG_ASSET_DOWNLOAD_ID     0x2D008992u  // AssetFile_DownloadById
+#define KLPLAT_MSG_ASSET_DOWNLOAD_NAME   0x6336CEFAu  // AssetFile_DownloadByName
+#define KLPLAT_MSG_ASSET_DOWNLOAD_UPDATE 0x2FDD0CCDu  // Notification_AssetFile_DownloadUpdate
 #define KLPLAT_MSG_IAP_PURCHASES       974095385u  // IAP_GetViewerPurchases
 #define KLPLAT_MSG_IAP_PURCHASES_CACHE 1666817579u // IAP_GetViewerPurchasesDurableCache
 #define KLPLAT_MSG_IAP_PRODUCTS       2124073717u  // IAP_GetProductsBySKU
@@ -435,18 +465,35 @@ static uint64_t klplat_request_str(const char *what, uint32_t type,
 
 // ...and the failing spelling: the same request/completion pair, with the
 // completion an error.
-static uint64_t klplat_request_err(const char *what, uint32_t type) {
+// `msg` (optional) is the error's text; NULL is the store-absent sentence.
+static uint64_t klplat_request_err_msg(const char *what, uint32_t type, const char *msg) {
     pthread_mutex_lock(&g_msg_mu);
     uint64_t id = g_next_request++;
     if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
         klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
-        m->type = type; m->request = id; m->payload = 0; m->str = NULL;
+        m->type = type; m->request = id; m->payload = 0; m->str = msg;
         m->err = 1; m->kind = KLPLAT_KIND_NONE; m->obj = NULL;
     }
     pthread_mutex_unlock(&g_msg_mu);
     fprintf(stderr, "  [plat] %s -> request %llu, ERROR completion queued "
                     "(type 0x%08x)\n", what, (unsigned long long)id, type);
     return id;
+}
+static uint64_t klplat_request_err(const char *what, uint32_t type) {
+    return klplat_request_err_msg(what, type, NULL);
+}
+
+// A NOTIFICATION: request id 0, which is how the SDK tells one from a
+// completion. Queued only right behind the request it reports on.
+static void klplat_notify(const char *what, uint32_t type, const void *obj) {
+    pthread_mutex_lock(&g_msg_mu);
+    if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
+        klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
+        m->type = type; m->request = 0; m->payload = 0; m->str = NULL;
+        m->err = 0; m->kind = KLPLAT_KIND_NONE; m->obj = obj;
+    }
+    pthread_mutex_unlock(&g_msg_mu);
+    fprintf(stderr, "  [plat] %s -> notification queued (type 0x%08x)\n", what, type);
 }
 
 // ...and the int-payload spelling, which is all but one caller.
@@ -498,9 +545,10 @@ static uint64_t klplat_Message_IsError(const klplat_msg *m) {
     plat_hit("ovr_Message_IsError");
     return m ? (uint64_t)m->err : 0;
 }
-// The error handle IS the message, as the payload handle is. One error is ever
-// produced, so its text is a constant: what happened, in words a person reading
-// the game's own dialog can act on.
+// The error handle IS the message, as the payload handle is. Its text is what
+// happened, in words a person reading the game's own dialog can act on: the
+// message's own `str` when it carries one (a language pack that is not on the
+// device), else the store-absent sentence (a refused checkout).
 #define KLPLAT_ERR_NO_STORE \
     "The Oculus store is not available on this device, so nothing was purchased."
 static uint64_t klplat_Message_GetError(const klplat_msg *m) {
@@ -519,13 +567,11 @@ static uint64_t klplat_Error_GetHttpCode(const klplat_msg *m) {
 }
 static const char *klplat_Error_GetMessage(const klplat_msg *m) {
     plat_hit("ovr_Error_GetMessage");
-    (void)m;
-    return KLPLAT_ERR_NO_STORE;
+    return m && m->str ? m->str : KLPLAT_ERR_NO_STORE;
 }
 static const char *klplat_Error_GetDisplayableMessage(const klplat_msg *m) {
     plat_hit("ovr_Error_GetDisplayableMessage");
-    (void)m;
-    return KLPLAT_ERR_NO_STORE;
+    return m && m->str ? m->str : KLPLAT_ERR_NO_STORE;
 }
 // The checkout itself. A real function for the same reason the accessors are:
 // the SKU arrives in x0.
@@ -549,6 +595,7 @@ static uint64_t klplat_IAP_LaunchCheckoutFlow(const char *sku) {
 typedef struct {
     uint64_t id; char path[1024]; char tag[32];
     const char *status;          // "installed" or "available"
+    unsigned long long size;     // the manifest's size (batman) / the file's (AC Nexus)
 } klplat_asset;
 // A handful per run (the game asks for the current language, perhaps a
 // fallback), handed out round-robin: a details handle is read once, right after
@@ -609,6 +656,7 @@ static int klplat_scan_obb_langpacks(void) {
         for (const char *p = de->d_name; *p; p++) a->id = a->id * 131 + (unsigned char)*p;
         if (!a->id) a->id = 1;
         a->status = "installed";
+        a->size = (unsigned long long)st.st_size;
         g_nlang++;
     }
     closedir(d);
@@ -666,6 +714,7 @@ static uint64_t klplat_langpack_StatusByName(const char *name) {
     struct stat st;
     int there = stat(a->path, &st) == 0 && (unsigned long long)st.st_size == want;
     a->status = there ? "installed" : "available";
+    a->size = want;
     fprintf(stderr, "  [plat] language pack '%s' (%s): %s\n", name, tag,
             there ? "on disk at the manifest's size -> installed"
                   : "not on disk -> available (it cannot be fetched from here)");
@@ -677,6 +726,135 @@ static uint64_t klplat_langpack_StatusByName(const char *name) {
         if (g_msgq[i % KLPLAT_MSGQ].request == id) g_msgq[i % KLPLAT_MSGQ].obj = a;
     pthread_mutex_unlock(&g_msg_mu);
     return id;
+}
+// ---- a pack download (see the note above plat_is_langpack_status) ----------
+#define KLPLAT_ERR_LANGPACK \
+    "This language pack is not on this device and cannot be downloaded from inside the game. " \
+    "Install it from the AVP Game Hub (it downloads the packs for your language)."
+
+// batman: the manifest line whose file is `name`, or whose id (the hash
+// StatusByName hands out) is `id`, as a details slot with its disk status.
+static klplat_asset *klplat_langpack_lookup(const char *name, uint64_t id) {
+    if (plat_is_obb_langpack_target()) {
+        klplat_scan_obb_langpacks();
+        for (int i = 0; i < g_nlang; i++) {
+            const char *base = strrchr(g_lang[i].path, '/');
+            if (name ? (base && strcmp(base + 1, name) == 0) : g_lang[i].id == id) return &g_lang[i];
+        }
+        return NULL;
+    }
+    if (name && strchr(name, '/')) return NULL;
+    const char *files = kl_jni_files_dir();
+    char dir[1100];
+    snprintf(dir, sizeof dir, "%s/obb", files ? files : ".");
+    char mf[1200];
+    snprintf(mf, sizeof mf, "%s/localized-asset-manifest.txt", dir);
+    FILE *f = fopen(mf, "r");
+    if (!f) return NULL;
+    char line[512];
+    klplat_asset *a = NULL;
+    while (!a && fgets(line, sizeof line, f)) {
+        char *c1 = strchr(line, ':');
+        char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+        if (!c2) continue;
+        *c1 = 0; *c2 = 0;
+        const char *file = c1 + 1;
+        if (!*file || strchr(file, '/')) continue;
+        uint64_t h = 0;
+        for (const char *p = file; *p; p++) h = h * 131 + (unsigned char)*p;
+        if (!h) h = 1;
+        if (name ? strcmp(file, name) != 0 : h != id) continue;
+        a = &g_assets[g_asset_next++ % (sizeof g_assets / sizeof g_assets[0])];
+        memset(a, 0, sizeof *a);
+        a->id = h;
+        a->size = strtoull(c2 + 1, NULL, 10);
+        snprintf(a->path, sizeof a->path, "%s/%s", dir, file);
+        snprintf(a->tag, sizeof a->tag, "%s", line);
+        struct stat st;
+        a->status = stat(a->path, &st) == 0 && (unsigned long long)st.st_size == a->size
+                        ? "installed" : "available";
+    }
+    fclose(f);
+    return a;
+}
+
+// The pack the game asked for and did not get, for the hub's next open: one
+// small file in the game's own files dir (<container>/android-files on the
+// headset), its language tag then its file name, one per line. The hub shows
+// "the game asked for voice pack X — download it here" on the game's card and
+// deletes the file once that pack is installed. Best effort: a write that
+// fails costs the banner only.
+#define KLPLAT_LANGPACK_REQUEST_FILE "klepton-voicepack-request.txt"
+static void klplat_langpack_note_request(const char *tag, const char *file) {
+    const char *files = kl_jni_files_dir();
+    if (!files || !*files) return;
+    char path[1200];
+    snprintf(path, sizeof path, "%s/" KLPLAT_LANGPACK_REQUEST_FILE, files);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%s\n%s\n", tag ? tag : "", file ? file : "");
+    fclose(f);
+    fprintf(stderr, "  [plat] noted for the hub: %s (%s)\n", path, tag ? tag : "?");
+}
+
+static uint64_t klplat_langpack_Download(const char *what, uint32_t type,
+                                         const char *name, uint64_t id) {
+    plat_hit(what);
+    klplat_asset *a = klplat_langpack_lookup(name, id);
+    // Not a language pack of this game: what it is cannot be known from here,
+    // and that is the refusal's case, unchanged.
+    if (!a) return klplat_drm(what);
+    const char *base = strrchr(a->path, '/');
+    base = base ? base + 1 : a->path;
+    if (strcmp(a->status, "installed") == 0) {
+        fprintf(stderr, "  [plat] %s: language pack '%s' (%s) is already on disk "
+                        "(%llu bytes) -> completed, nothing fetched\n",
+                what, base, a->tag, a->size);
+        uint64_t req = klplat_request(what, type, 0);
+        pthread_mutex_lock(&g_msg_mu);
+        for (unsigned i = g_msg_head; i != g_msg_tail; i++)
+            if (g_msgq[i % KLPLAT_MSGQ].request == req) g_msgq[i % KLPLAT_MSGQ].obj = a;
+        pthread_mutex_unlock(&g_msg_mu);
+        klplat_notify("Notification_AssetFile_DownloadUpdate (completed)",
+                      KLPLAT_MSG_ASSET_DOWNLOAD_UPDATE, a);
+        return req;
+    }
+    fprintf(stderr, "  [plat] %s: language pack '%s' (%s) is NOT on disk -> error "
+                    "completion (it cannot be fetched from here; the hub downloads it)\n",
+            what, base, a->tag);
+    klplat_langpack_note_request(a->tag, base);
+    return klplat_request_err_msg(what, type, KLPLAT_ERR_LANGPACK);
+}
+static uint64_t klplat_AssetFile_DownloadById(uint64_t id) {
+    if (!plat_is_langpack_target()) return klplat_drm("ovr_AssetFile_DownloadById");
+    return klplat_langpack_Download("ovr_AssetFile_DownloadById",
+                                    KLPLAT_MSG_ASSET_DOWNLOAD_ID, NULL, id);
+}
+static uint64_t klplat_AssetFile_DownloadByName(const char *name) {
+    if (!plat_is_langpack_target()) return klplat_drm("ovr_AssetFile_DownloadByName");
+    return klplat_langpack_Download("ovr_AssetFile_DownloadByName",
+                                    KLPLAT_MSG_ASSET_DOWNLOAD_NAME, name ? name : "", 0);
+}
+// The download result and the update ride on the message as the details do.
+static uint64_t klplat_langpack_Message_GetObj(const klplat_msg *m) {
+    plat_hit("ovr_Message_GetAssetFileDownload*");
+    return (uint64_t)(uintptr_t)(m ? m->obj : NULL);
+}
+static uint64_t klplat_langpack_dl_id(const klplat_asset *a) {
+    plat_hit("ovr_AssetFileDownload*_GetAssetId");
+    return a ? a->id : 0;
+}
+static const char *klplat_langpack_dl_path(const klplat_asset *a) {
+    plat_hit("ovr_AssetFileDownloadResult_GetFilepath");
+    return a ? a->path : "";
+}
+static uint64_t klplat_langpack_dl_bytes(const klplat_asset *a) {
+    plat_hit("ovr_AssetFileDownloadUpdate_GetBytes*");
+    return a ? (uint64_t)a->size : 0;
+}
+static uint64_t klplat_langpack_dl_completed(const klplat_asset *a) {
+    plat_hit("ovr_AssetFileDownloadUpdate_GetCompleted");
+    return a ? 1 : 0;
 }
 static uint64_t klplat_langpack_Message_GetAssetDetails(const klplat_msg *m) {
     plat_hit("ovr_Message_GetAssetDetails");
@@ -2346,6 +2524,23 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     // course entries above and branch on plat_is_langpack_target(); these four
     // exist only for language packs.
     {"ovr_AssetDetails_GetLanguage",       (void *)klplat_AssetDetails_GetLanguage_any},
+    // A pack download (langpack targets only; any other title still refuses
+    // inside the handler, and these readers are reached only from its messages).
+    {"ovr_AssetFile_DownloadById",          (void *)klplat_AssetFile_DownloadById},
+    {"ovr_AssetFile_DownloadByName",        (void *)klplat_AssetFile_DownloadByName},
+    {"ovr_AssetFile_DownloadByName_Native", (void *)klplat_AssetFile_DownloadByName},
+    {"ovr_Message_GetAssetFileDownloadResult", (void *)klplat_langpack_Message_GetObj},
+    {"ovr_Message_GetAssetFileDownloadUpdate", (void *)klplat_langpack_Message_GetObj},
+    {"ovr_AssetFileDownloadResult_GetAssetId",  (void *)klplat_langpack_dl_id},
+    {"ovr_AssetFileDownloadResult_GetFilepath", (void *)klplat_langpack_dl_path},
+    {"ovr_AssetFileDownloadResult_GetFilepath_Native", (void *)klplat_langpack_dl_path},
+    {"ovr_AssetFileDownloadUpdate_GetAssetFileId", (void *)klplat_langpack_dl_id},
+    {"ovr_AssetFileDownloadUpdate_GetAssetId",  (void *)klplat_langpack_dl_id},
+    {"ovr_AssetFileDownloadUpdate_GetBytesTotal",          (void *)klplat_langpack_dl_bytes},
+    {"ovr_AssetFileDownloadUpdate_GetBytesTotalLong",      (void *)klplat_langpack_dl_bytes},
+    {"ovr_AssetFileDownloadUpdate_GetBytesTransferred",    (void *)klplat_langpack_dl_bytes},
+    {"ovr_AssetFileDownloadUpdate_GetBytesTransferredLong",(void *)klplat_langpack_dl_bytes},
+    {"ovr_AssetFileDownloadUpdate_GetCompleted",           (void *)klplat_langpack_dl_completed},
     {"ovr_LanguagePackInfo_GetEnglishName", (void *)klplat_LanguagePackInfo_tag},
     {"ovr_LanguagePackInfo_GetNativeName",  (void *)klplat_LanguagePackInfo_tag},
     {"ovr_LanguagePackInfo_GetTag",         (void *)klplat_LanguagePackInfo_tag},

@@ -92,7 +92,8 @@ export KLEPTON_TARGET="${TARGET_ARG:-${KLEPTON_TARGET:-}}"
 # status, not the command's: an unknown target printed its own error and then
 # the script carried on to die on an unbound KLT_NAME, which buries the one line
 # that said what was wrong.
-KLT_VARS=$(python3 visionos/targets.py "$KLEPTON_TARGET") || exit 1
+# (Quiet about hub games left out for missing files: run.sh says that, once.)
+KLT_VARS=$(KL_HUB_QUIET=1 python3 visionos/targets.py "$KLEPTON_TARGET") || exit 1
 eval "$KLT_VARS"
 export KLEPTON_TARGET="$KLT_NAME"
 BUNDLE_ID="${KLEPTON_BUNDLE_ID:-$KLT_BUNDLE}"

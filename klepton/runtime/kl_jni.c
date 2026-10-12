@@ -1567,6 +1567,19 @@ static const char *klj_field_sval(const klj_field *f) {
         if (!strcmp(f->name, "FINGERPRINT"))
             return "oculus/eureka/eureka:10/SQ3A.220605.009.A1/1:user/release-keys";
     }
+    // metro (Metro Awakening) is the STEAM FRAME build, and it picks its store,
+    // its OpenXR loader and its device profile from the maker: told "Oculus" it
+    // takes the Meta path (libopenxr_loader_meta, Oculus Platform entitlement,
+    // which has no service here and ends at "could not verify the app's
+    // privileges"); told "Valve" it takes the Steam path the purchase is on
+    // (libopenxr_loader_valve, libsteam_api -> kl_steam, the real account
+    // through the Steam bridge). Only the maker changes: the rest of the Quest
+    // surface (MODEL, DEVICE, ...) is left alone because the Frame's real values
+    // were never measured, and the maker alone is what flips the path.
+    if (t && strcmp(t, "metro") == 0) {
+        if (!strcmp(f->name, "MANUFACTURER")) return "Valve";
+        if (!strcmp(f->name, "BRAND"))        return "valve";
+    }
     return f->sval;
 }
 

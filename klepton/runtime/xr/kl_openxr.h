@@ -96,6 +96,13 @@ int kl_openxr_space_selftest(FILE *f);
 // checks is the surface the guest calls rather than a copy of it.
 int kl_openxr_input_selftest(FILE *f);
 
+// The swapchain call order, as the spec has it and as UE's OpenXR plugin uses
+// it (one image kept acquired across frames: wait, acquire-next, release): the
+// image released — the one the compositor shows — must be the oldest waited
+// one, never the one just acquired. Also covers the classic A/W/R order.
+// Returns 1 on pass; in t_xrinput, so in `make check`.
+int kl_openxr_swapchain_selftest(FILE *f);
+
 // The frame clock, for a host that has one.
 //
 // xrWaitFrame is where an OpenXR runtime is specified to block until the app

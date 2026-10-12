@@ -24,6 +24,7 @@ int main(void) {
 
     printf("=== OpenXR actions, poses and haptics ===\n");
     int ok = kl_openxr_input_selftest(stdout);
+    ok = kl_openxr_swapchain_selftest(stdout) && ok;
     printf("%s: the action surface reads the input kl_ovrp holds\n",
            ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

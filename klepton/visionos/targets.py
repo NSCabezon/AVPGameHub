@@ -154,6 +154,9 @@ TARGETS = {
         "hand_matting": False,
     },
     "superhot": {
+        # Foveation is the OpenGL guests' rate map (kl_glfb); a Vulkan guest's
+        # passes are MoltenVK's, so the hub shows the setting as unavailable.
+        "gl_foveation": False,
         # SUPERHOT VR — Unity + IL2CPP + the Oculus Mobile SDK, i.e. the same
         # shape as Beat Saber and the reason it is the third target: it shares
         # the entire Unity path and exercises it against an APK nothing here was
@@ -178,6 +181,126 @@ TARGETS = {
         "kind":    "unity",
         "product": "KleptonSuperhot",
         "display": "SUPERHOT",
+    },
+    "ieytd": {
+        # I Expect You To Die (Schell Games), Quest build 1.2.174682
+        # (com.schellgames.ieytdquest, versionCode 74682). Unity 2019.4.21f1 +
+        # IL2CPP on the LEGACY built-in VR path: boot.config says
+        # `vr-enabled=1` / `vr-device-list=Oculus`, with no xrsdk-pre-init line,
+        # so Unity drives libOVRPlugin + libvrapi itself (Beat Saber 1.6's shape,
+        # not 1.40's OculusXRPlugin). All three Oculus libraries are REPLACED
+        # (kl_ovrp / kl_ovrplat); what is translated is the title's own set:
+        # libAudioPluginOculusSpatializer, libOVRLipSync and
+        # libovravatarloader beside libmain/libunity/libil2cpp.
+        #
+        # Not a split binary: no OBB, everything is in the 533 MB APK.
+        #
+        # Measured on the Mac host (2026-10-08):
+        #  - `--gap` and the boot gate were clean on the first run: libmain +
+        #     libunity bind with 0 unresolved, JNI_OnLoad and initJni reach
+        #     no unimplemented call, and 600 null-driver frames pump clean.
+        #     The spatializer, OVRLipSync and the avatar loader translate like
+        #     any guest library; the spatializer is loaded at boot, the other
+        #     two are never dlopened before the first room, so nothing of
+        #     theirs had to be stubbed. Entitlement: kl_ovrplat's existing
+        #     answer for the app's own check (`_entitlementCheckPassed` = 1).
+        #  - Black at full frame rate twice over, for two different reasons:
+        #     (1) GL_OVR_multiview was offered by name to "ieytd*" but the
+        #     vendored Metal ANGLE cannot compile it — now withheld unless
+        #     ANGLE exposes it, and Unity takes multi-pass stereo; (2) the game
+        #     never selects FloorLevel, so it runs on OVRPlugin's EyeLevel
+        #     origin, and the floor-frame head put its calibration panel 1.7 m
+        #     below the view — now anchored (KL_OVRP_EYELEVEL, and a real
+        #     ovrp_RecenterTrackingOrigin, which the calibration calls).
+        #  - First boot shows the seated calibration ("hold any button"), then
+        #     the language-select room. Spanish because the host locale is
+        #     es_ES. Unity 2019.4's texture-unit cap of 32 rejected ~100 binds
+        #     a frame there (black slabs, blank labels); this build's offsets
+        #     are measured and the raise to 64 is on (kl_guestpoke.c).
+        # Measured on the Mac host (2026-10-12):
+        #  - The 16 "GLSL compilation failed, no infolog" were Unity's compute
+        #     SKINNING kernels (we described ES 3.2; ANGLE/Metal is ES 3.0 and
+        #     has no compute), and every SkinnedMeshRenderer — the gloved hands
+        #     — went undrawn. ieytd is now told ES 3.0 (kl_egl.c), the kernels
+        #     are never built and the hands draw.
+        #  - Recenter now also takes out the head's yaw for this EyeLevel guest.
+        #  - A headless run plays through: calibration, language room ("Done"),
+        #     intro, the office tutorial (18 steps: leaning, radio button,
+        #     note + lighter, telekinesis, freezing three targets, the spy
+        #     gun, the drawer, the mission disc) and Start, into the first
+        #     mission (GameManager LevelState, the Car scene) — driven by
+        #     KL_OVRP_POKE + KL_OVRP_HAND_SCRIPT + KL_PROBE_* (DEBUG_ENV_VARS.md);
+        #     the script itself is AlyxAVP/local/ieytd/scripts/tutorial.sh, not in
+        #     this repo. Headless M1 Max: ~57 fps in the office, ~28 in the car.
+        "libs":    None,
+        "srcdir":  "ieytd/lib/arm64-v8a",
+        "tree":    "ieytd",
+        "apk":     "ieytd.apk",
+        "assets":  "ieytd/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "entry":   "libmain",
+        "kind":    "unity",
+        "product": "KleptonIEYTD",
+        "display": "I Expect You To Die",
+        # The game draws its own gloved hands where the user's are, so the
+        # system's matte of the real arms would be a second pair (beatsaber128).
+        "hand_matting": False,
+        # Default for an M2, not yet measured on the headset: Unity 2019 GLES
+        # through ANGLE/Metal with multi-pass stereo (each eye drawn twice
+        # over). On the Mac host (M1 Max, 1832x1920 per eye, with PNG capture
+        # on) the office ran ~55-60 fps but the first level (the car) ~28.
+        # 0.7 is half the pixels, Batman's value; the in-app "Render
+        # resolution" slider starts here and can go up if the headset allows.
+        "render_scale": 0.7,
+    },
+    "ktane": {
+        # Keep Talking and Nobody Explodes (Steel Crate Games), Quest build
+        # 1.10.15 (com.steelcrategames.keeptalkingandnobodyexplodes, versionCode
+        # 87), Meta app 2010043642376517. Unity 2022.3.62f3 + IL2CPP on the XR
+        # SDK path (boot.config `xrsdk-pre-init-library=OculusXRPlugin`):
+        # Beat Saber 1.40's / Walkabout's shape — libOVRPlugin + libOculusXRPlugin
+        # for the display, libovrplatformloader for the Meta platform (kl_ovrp /
+        # kl_ovrplat). libopenxr_loader ships beside them but is OVRPlugin's own
+        # backend, never the title's. Not a split binary: no OBB, everything is
+        # in the 150 MB APK. A two-player game: the second player reads the
+        # manual (bombmanual.com), nothing to ship.
+        # Measured headless on the Mac (2026-10-12): title -> intro cards ->
+        # "manual required" screen (the code is the one printed in the manual
+        # the second player reads: 925 for version 1-es, 241 for 1-en) -> the
+        # controls tutorial (grab the bomb, turn it, cut the blue wire, reset
+        # the room from the dossier menu) -> the Setup Room -> binder -> "1.3
+        # The First Bomb" -> the facility room, where the bomb is picked up,
+        # turned and a wire cut. Text was solid quads until the texture-unit
+        # cap row in kl_guestpoke.c was keyed on "ktane" (it was keyed on
+        # avp-play's store name): 32 -> 64, zero "Invalid texture unit!".
+        # ~100 fps uncapped with no capture (Setup Room), ~50 with a PNG every
+        # 100 frames. ovr_User_GetLoggedInUser -> 0 logs one "Request failed"
+        # and the game carries on offline (leaderboards only), so no
+        # KL_PLAT_USER. The input script is AlyxAVP/local/ktane/scripts/
+        # (play.sh: fresh profile through the tutorial; room.sh: a profile past
+        # it, into the first bomb), not in this repo.
+        "libs":    None,
+        "srcdir":  "ktane/lib/arm64-v8a",
+        "tree":    "ktane",
+        "apk":     "ktane.apk",
+        "assets":  "ktane/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "entry":   "libmain",
+        "kind":    "unity",
+        "product": "KleptonKTANE",
+        "display": "Keep Talking and Nobody Explodes",
+        # The game draws its own controllers/hands where the user's are, so the
+        # system's matte of the real arms would be a second pair (beatsaber128).
+        "hand_matting": False,
+        # Default for an M2, not yet measured on the headset: a light scene (one
+        # room, one bomb) but Unity 2022 GLES through ANGLE/Metal, both eyes
+        # drawn. Headless on the M1 Max (1832x1920 per eye) ~100 fps uncapped,
+        # ~50 with a PNG capture every 100 frames. 0.8 is ~two thirds of the pixels and
+        # keeps the bomb's small module labels readable; the in-app "Render
+        # resolution" slider starts here.
+        "render_scale": 0.8,
     },
     "walkabout": {
         # Walkabout Mini Golf 6.7 (Mighty Coconut), package
@@ -215,6 +338,9 @@ TARGETS = {
         "hand_matting": False,
     },
     "batman": {
+        # Foveation is the OpenGL guests' rate map (kl_glfb); a Vulkan guest's
+        # passes are MoltenVK's, so the hub shows the setting as unavailable.
+        "gl_foveation": False,
         # Batman: Arkham Shadow 1.4.1 (com.camouflaj.manta, versionCode 350961).
         # Unity 2022 + IL2CPP + Burst, the Oculus XR plugin, Wwise for audio,
         # and Vulkan REQUIRED by its manifest — so the same shape as bonelab
@@ -530,6 +656,9 @@ TARGETS = {
         "display": "Vampire: The Masquerade - Justice",
     },
     "metro": {
+        # Foveation is the OpenGL guests' rate map (kl_glfb); a Vulkan guest's
+        # passes are MoltenVK's, so the hub shows the setting as unavailable.
+        "gl_foveation": False,
         # Metro Awakening (Vertigo Games), package com.vertigogames.
         # ImpactDevelopment (project "Impact") — the STEAM FRAME build (Steam app
         # 2669410, Android depot 2669412), and the first UE5 title here that is
@@ -574,6 +703,16 @@ TARGETS = {
         "kind":    "ue4",
         "product": "KleptonMetro",
         "display": "Metro Awakening",
+        # The game draws its own hands; the passthrough pair on top is a second,
+        # mismatched one.
+        "hand_matting": False,
+        # Fraction of the capped eye texture the game is told (the "Render
+        # resolution" setting starts here; in the hub, until the slider is
+        # moved). Not measured on a headset yet: a UE5 title through MoltenVK
+        # with no fixed foveation, on an M2. 0.6 is a little over a third of
+        # the capped pixels — about a Quest 2's eye — and the in-app slider
+        # goes back up if the fps allow (batman uses 0.7 on an M5).
+        "render_scale": 0.6,
     },
     "vicecity": {
         # GTA Vice City VR (GTAVCVR) — a reVC/re3 (open-source re-implementation)
@@ -1042,6 +1181,31 @@ TARGETS = {
             # Sources/KleptonMetaContent.swift). Offered only when the recipe's
             # build is the one this port is translated from (KleptonCatalog.swift).
             "beatsaber",
+            # Batman: Arkham Shadow 1.4.1 (com.camouflaj.manta 350961), Meta's
+            # store only: APK to games/batman/meta/, the main OBB and the loose
+            # audio OBBs, videos, manifest and 69 Addressables bundles (18.3 GB)
+            # to android-files/obb/ — the row's obb_raw layout, as the game reads
+            # them by name. Voice packs are opt-in (MetaStore recipe `locale`).
+            "batman",
+            # I Expect You To Die 1.2.174682 (com.schellgames.ieytdquest 74682),
+            # Meta's store only (app 1987283631365460): one 533 MB APK, no OBB,
+            # to games/ieytd/meta/IEYTD.apk; the hub derives ieytd.apk and
+            # ieytd/assets from it (Sources/KleptonHubPrep.swift).
+            "ieytd",
+            # Keep Talking and Nobody Explodes 1.10.15
+            # (com.steelcrategames.keeptalkingandnobodyexplodes 87), Meta's store
+            # (app 2010043642376517): one 150 MB APK, no OBB, to
+            # games/ktane/meta/KeepTalkingandNobodyExplodes.apk; the hub derives
+            # ktane.apk and ktane/assets from it (Sources/KleptonHubPrep.swift).
+            "ktane",
+            # Metro Awakening, the Steam Frame build (app 2669410, Android depot
+            # 2669412: Impact-Android-Shipping-arm64.apk + main.944116 and 13
+            # chunk OBBs, 19.2 GB). The depot lands straight in the OBB
+            # directory UE builds itself (android-files/Android/obb/<package>),
+            # the hub derives metro.apk and metro/assets from the APK; the
+            # runtime takes the game's Steam path (kl_jni.c maker "Valve"), so
+            # ownership is the real account's through the Steam bridge.
+            "metro",
         ],
         "bundle_id": "com.example.avpgamehub",   # placeholder: KLEPTON_BUNDLE_ID (local/config.env)
         "product": "KleptonHub",
@@ -1347,17 +1511,18 @@ def resolve(name):
         t.setdefault(k, "")
     t["data_panel"] = "obb_file" in TARGETS[name]
     if t["kind"] == "hub":
-        # Space-separated for the shells (`targets.py hub games`); the generator
-        # reads hub_games() for the list itself.
-        t["games"] = " ".join(t["games"])
+        # Space-separated for the shells (`targets.py hub games`): the games THIS
+        # build carries (hub_games: the KLEPTON_HUB_GAMES subset, minus any whose
+        # inputs are missing). The generator reads hub_games() for the list itself.
+        t["games"] = " ".join(hub_games(name))
         return t
     if t["libs"] is None:
         t["libs"] = glibc_libs_for(name) if t["kind"] == "glibc" else libs_for(t["srcdir"])
     return t
 
 
-def hub_games(name):
-    """The games a hub row carries, each validated as a real guest row."""
+def hub_games_all(name):
+    """Every game a hub row lists, in library order, each validated as a real guest row."""
     games = list(TARGETS[name].get("games", []))
     for g in games:
         if g not in TARGETS or TARGETS[g]["kind"] == "hub":
@@ -1367,6 +1532,109 @@ def hub_games(name):
         print(f"!! hub {name!r} lists no games", file=sys.stderr)
         sys.exit(1)
     return games
+
+
+# What a hub build needs ON THIS MAC per game, and how to get it when it is not
+# there. The game DATA is never needed here (the headset downloads it); the
+# game's CODE is, because its libraries are translated at build time:
+#
+#  - an APK game: its decoded tree, <tree>/lib/arm64-v8a/*.so (apktool d);
+#  - a glibc game (alyx): the --gap manifest build/<name>_images.txt and every
+#    library it names (the depot's bin/ and the Steam Linux Runtime sysroot).
+#
+# A game whose inputs are missing is LEFT OUT of the build rather than stopping
+# it: the hub still lists it, as "not in this build" (the manifest's `bundled:`
+# flag), so a build with only some games — or none — still installs and runs.
+HUB_INPUT_HINTS = {
+    "alyx": "download Half-Life: Alyx's Linux arm64 depot (546564) into local/game/bin and the "
+            "Steam Linux Runtime 4 arm64 into local/game/steamrt4-arm64, then run "
+            "`./build_run_host.sh alyx --gap` (docs/GUIDE.md, \"Getting each game's files\")",
+}
+_HUB_APK_HINT = ("get its APK ({apk}) and decode it: `apktool d -f -o {tree} {apk}` in klepton/ "
+                 "(docs/GUIDE.md, \"Getting each game's files\")")
+
+
+def hub_game_missing(g):
+    """What game `g` lacks for a hub build on this Mac ("" = nothing: it can be built in)."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    t = TARGETS[g]
+    if t["kind"] == "glibc":
+        path = glibc_manifest(g)
+        try:
+            with open(path) as f:
+                rows = [l.rstrip("\n").split("\t") for l in f if l.strip()]
+        except OSError:
+            rows = []
+        if not rows:
+            return f"no {os.path.relpath(path, root)} (the --gap image list)"
+        gone = [r[1] for r in rows if len(r) < 2 or not os.path.isfile(r[1])]
+        if gone:
+            return (f"{len(gone)} of the {len(rows)} libraries build/{g}_images.txt names are "
+                    f"not on this Mac (first: {gone[0]})")
+        return ""
+    libdir = os.path.join(root, t["srcdir"])
+    try:
+        has_so = any(n.endswith(".so") for n in os.listdir(libdir))
+    except OSError:
+        return f"no {t['srcdir']}/ (the decoded APK)"
+    return "" if has_so else f"no .so files in {t['srcdir']}/"
+
+
+def hub_game_hint(g):
+    t = TARGETS[g]
+    return HUB_INPUT_HINTS.get(g) or _HUB_APK_HINT.format(apk=t["apk"], tree=t["tree"])
+
+
+def hub_games(name, quiet=False):
+    """The games THIS build of hub `name` carries: KLEPTON_HUB_GAMES (comma- or
+    space-separated; "none" = no game, a library-only hub) narrows the row's list,
+    then every game whose inputs are missing on this Mac is dropped, with a
+    warning saying what is missing and how to get it. May be empty."""
+    import os, re
+    games = hub_games_all(name)
+    want = os.environ.get("KLEPTON_HUB_GAMES", "").strip()
+    if want:
+        pick = [w for w in re.split(r"[,\s]+", want) if w and w != "none"]
+        unknown = [w for w in pick if w not in games]
+        if unknown:
+            print(f"!! KLEPTON_HUB_GAMES: {', '.join(unknown)} not in hub {name!r} "
+                  f"(one of: {', '.join(games)}, or none)", file=sys.stderr)
+            sys.exit(1)
+        games = [g for g in games if g in pick]
+    out, left = [], []
+    for g in games:
+        why = hub_game_missing(g)
+        if why:
+            left.append((g, why))
+        else:
+            out.append(g)
+    if left and not quiet and not os.environ.get("KL_HUB_QUIET"):
+        print(f"!! hub: {len(left)} game(s) left out of this build — their files are not on this "
+              f"Mac (the library still lists them as not in this build):", file=sys.stderr)
+        for g, why in left:
+            print(f"!!   {g} ({TARGETS[g]['display']}): {why}", file=sys.stderr)
+            print(f"!!     to add it: {hub_game_hint(g)}", file=sys.stderr)
+        print(f"!! building with: {', '.join(out) if out else 'no games (library only)'}",
+              file=sys.stderr)
+    return out
+
+
+def hub_check(name):
+    """`targets.py --hub-check [hub]`: one line per listed game, for the Mac app's
+    Status: <game>\t<display>\tok|skip|missing\t<what is missing>\t<how to get it>
+    (skip = excluded by KLEPTON_HUB_GAMES)."""
+    import os, re
+    want = os.environ.get("KLEPTON_HUB_GAMES", "").strip()
+    pick = set(w for w in re.split(r"[,\s]+", want) if w) if want else None
+    for g in hub_games_all(name):
+        t = TARGETS[g]
+        if pick is not None and g not in pick:
+            print(f"{g}\t{t['display']}\tskip\tKLEPTON_HUB_GAMES\t")
+            continue
+        why = hub_game_missing(g)
+        print(f"{g}\t{t['display']}\t{'missing' if why else 'ok'}\t{why}\t{hub_game_hint(g) if why else ''}")
+    return 0
 
 
 # The runtime's copy of the table, as an X-macro list. Only the fields C needs
@@ -1412,6 +1680,8 @@ def main(argv):
         for k in sorted(TARGETS):
             print(k)
         return 0
+    if len(argv) > 1 and argv[1] == "--hub-check":
+        return hub_check(argv[2] if len(argv) > 2 else "hub")
     if len(argv) > 1 and argv[1] == "--c-table":
         print(c_table())
         return 0

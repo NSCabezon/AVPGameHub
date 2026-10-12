@@ -44,6 +44,8 @@ static void         watchdog_start(void);
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;   // unit lifecycle only
 
 static unsigned g_in_rate, g_in_ch, g_in_bits;   // the guest's format
+static kl_audio_tap_fn g_tap;                    // kl_audio_set_tap
+static _Atomic int     g_mute_local;
 static unsigned g_out_ch = 2;
 static double   g_out_rate;                      // the device's, measured
 static double   g_session_rate;                  // what Swift told us, if anything
@@ -286,6 +288,10 @@ static OSStatus render_cb(void *ref, AudioUnitRenderActionFlags *flags,
     }
     atomic_fetch_add_explicit(&g_frames_played, take, memory_order_relaxed);
     atomic_store_explicit(&g_r, r + take, memory_order_release);
+    // The stream host's "the headset plays it": consumed at the device's
+    // rate as always (the clock), heard nowhere here.
+    if (atomic_load_explicit(&g_mute_local, memory_order_relaxed))
+        memset(dst, 0, want * g_out_ch * sizeof(float));
     return noErr;
 }
 
@@ -773,11 +779,18 @@ size_t kl_audio_write(const void *pcm, size_t bytes) {
 
 int kl_audio_peak(void) { return g_peak; }
 
+void kl_audio_set_tap(kl_audio_tap_fn fn, int mute_local) {
+    g_tap = fn;
+    atomic_store_explicit(&g_mute_local, mute_local ? 1 : 0, memory_order_relaxed);
+}
+
 size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     if (!g_open || !pcm || !bytes) return 0;
     unsigned in_frame = g_in_ch * 2;              // 16-bit, checked at open
     size_t n = bytes / in_frame;
     if (!n) return 0;
+    kl_audio_tap_fn tap = g_tap;
+    if (tap) tap(src, (const int16_t *)pcm, n, g_in_rate, g_in_ch);
 
     int peak = 0;
     const int16_t *s16 = (const int16_t *)pcm;

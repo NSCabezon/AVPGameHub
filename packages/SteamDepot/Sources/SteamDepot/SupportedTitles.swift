@@ -118,6 +118,9 @@ public enum SupportedTitles {
         // Red Matter 2 (2081472) also ship an Android depot for Steam Frame.
         620980: SupportedTitle(target: "beatsaber", usesSteamBuild: false),
         617830: SupportedTitle(target: "superhot", usesSteamBuild: false),
+        // Metro Awakening: the Steam Frame Android depot 2669412 (APK + 14 OBBs) is the
+        // build Klepton's `metro` target is translated from.
+        2669410: SupportedTitle(target: "metro", usesSteamBuild: true),
         1592190: SupportedTitle(target: "bonelab", usesSteamBuild: false),
         1634870: SupportedTitle(target: "openbrush", usesSteamBuild: false),
         2081470: SupportedTitle(target: "redmatter2", usesSteamBuild: false),

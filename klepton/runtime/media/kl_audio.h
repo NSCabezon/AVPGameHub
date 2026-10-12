@@ -53,6 +53,16 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes);
 // slot in the mix is given back.
 void kl_audio_src_release(const void *src);
 
+// A copy of every guest buffer, for the Mac stream host (kl_stream_host.c
+// sends it to the headset): called from kl_audio_write_src on the producer's
+// thread, before conversion, with the guest's own format (16-bit, `channels`
+// interleaved, `rate` Hz) — never from the render callback. NULL removes it.
+// `mute_local` = 1 keeps the device clock (writes still block for their
+// duration, which is the guest's pacing) but plays silence here.
+typedef void (*kl_audio_tap_fn)(const void *src, const int16_t *pcm, size_t frames,
+                                unsigned rate, unsigned channels);
+void kl_audio_set_tap(kl_audio_tap_fn fn, int mute_local);
+
 // True once a device is open and running, i.e. kl_audio_write is the clock.
 int  kl_audio_active(void);
 

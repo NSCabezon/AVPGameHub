@@ -1778,6 +1778,7 @@ static int vk_copy_eye(int eye, int stage, const VRVulkanTextureData_t *t, const
     uint32_t w, h;
     eye_size(&w, &h);
     if (!w || !h || x1 <= x0 || y1 <= y0) return -1;
+    kl_ovrp_note_submit_size(eye, x1 - x0, y1 - y0);
     // KL_OPENVR_STAGE_SCALE=0 (KL_OPENVR_MINIMAL): no rescale. The stage image
     // is exactly the rendered rect, copied 1:1, and the compositor slot is
     // pointed at it for this frame — the picture reaches the compositor with

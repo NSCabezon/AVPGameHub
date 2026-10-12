@@ -245,6 +245,27 @@ final class DeviceAndCatalogTests: XCTestCase {
         XCTAssertEqual(Toolchain.environmentDefaults(["KLEPTON_TEAM": "T", "KLEPTON_DEVICE": ""]), ["team": "T"])
     }
 
+    func testPlaceholderBundleIDs() {
+        for id in ["", "  ", "com.example.avpgamehub", "com.yourname.avpgamehub", "COM.YourName.hub"] {
+            XCTAssertTrue(Toolchain.isPlaceholderBundleID(id), id)
+        }
+        for id in ["com.jdoe.avpgamehub", "dev.klepton.hub", "com.examples.hub"] {
+            XCTAssertFalse(Toolchain.isPlaceholderBundleID(id), id)
+        }
+    }
+
+    func testParseHubCheck() {
+        let out = "alyx\tHalf-Life: Alyx\tmissing\tno build/alyx_images.txt\trun --gap\n"
+            + "ktane\tKeep Talking\tok\t\t\n" + "metro\tMetro Awakening\tskip\tKLEPTON_HUB_GAMES\t\n" + "garbage line\n"
+        let rows = Toolchain.parseHubCheck(out)
+        XCTAssertEqual(rows.map(\.game), ["alyx", "ktane", "metro"])
+        XCTAssertEqual(rows.map(\.state), [.missing, .ok, .skip])
+        XCTAssertEqual(rows[0].missing, "no build/alyx_images.txt")
+        XCTAssertEqual(rows[0].hint, "run --gap")
+        XCTAssertEqual(rows[1].display, "Keep Talking")
+        XCTAssertEqual(rows[1].hint, "")
+    }
+
     func testProcessRunnerCapture() async {
         let r = await ProcessRunner.capture(.bash("echo one; echo two >&2; exit 3"))
         XCTAssertEqual(r.status, 3)

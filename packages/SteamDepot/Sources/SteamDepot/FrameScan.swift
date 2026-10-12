@@ -163,7 +163,7 @@ public struct FrameCandidate: Sendable, Codable, Hashable {
 public enum FrameScan {
     /// Titles the hub app can already download and run (vendor/Klepton visionos/Sources/
     /// KleptonSteamContent.swift, SteamGames). Keep in sync by hand.
-    public static let hubCatalog: [UInt32: String] = [546560: "alyx", 617830: "superhot"]
+    public static let hubCatalog: [UInt32: String] = [546560: "alyx", 617830: "superhot", 2669410: "metro"]
 
     static let skippedTypes: Set<String> = ["dlc", "music", "video", "series", "episode", "config", "advertising", "hardware"]
     static let nameHints = ["frame", "android", "arm64", "aarch64", "quest", "lepton"]

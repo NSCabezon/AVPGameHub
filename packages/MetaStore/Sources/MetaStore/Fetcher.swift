@@ -66,19 +66,21 @@ public struct GameStore: Sendable {
         try e.encode(record).write(to: recordURL, options: .atomic)
     }
 
-    /// Offline (stat only): this recipe's required files are all verified at their exact size.
-    public func isComplete(_ recipe: Recipe) -> Bool {
+    /// Offline (stat only): this recipe's required files, plus the voice-language packs in
+    /// `locales`, are all verified at their exact size.
+    public func isComplete(_ recipe: Recipe, locales: Set<String> = []) -> Bool {
         guard let r = loadRecord(), r.complete, r.recipeId == recipe.id, r.versionCode == recipe.versionCode else { return false }
-        return recipe.files.filter(\.required).allSatisfy { f in
+        return recipe.files(locales: locales).allSatisfy { f in
             guard let v = r.files[f.relativePath], v.size == f.size else { return false }
             return GameStore.fileSize(url(for: f)) == f.size
         }
     }
 
-    /// Bytes of the recipe's required files on disk (finished or partial), and the total.
-    public func requiredProgress(_ recipe: Recipe) -> (have: Int64, total: Int64) {
+    /// Bytes of the recipe's required files (plus the packs in `locales`) on disk (finished or
+    /// partial), and the total.
+    public func requiredProgress(_ recipe: Recipe, locales: Set<String> = []) -> (have: Int64, total: Int64) {
         var have: Int64 = 0, total: Int64 = 0
-        for f in recipe.files where f.required {
+        for f in recipe.files(locales: locales) {
             total += f.size ?? 0
             switch state(of: f) {
             case .present(let s), .partial(let s): have += min(s, f.size ?? s)
@@ -107,9 +109,12 @@ public struct FetchSelection: Sendable, Equatable {
     public var ownedSKUs: Set<String>
     /// Store ids Meta already refused for this account.
     public var withheld: Set<String>
-    public init(ownedSKUs: Set<String> = [], withheld: Set<String> = []) {
+    /// Voice-language packs to fetch (recipe file `locale` codes). Empty = none.
+    public var locales: Set<String>
+    public init(ownedSKUs: Set<String> = [], withheld: Set<String> = [], locales: Set<String> = []) {
         self.ownedSKUs = ownedSKUs
         self.withheld = withheld
+        self.locales = locales
     }
 }
 
@@ -125,10 +130,11 @@ public struct PlannedFetch: Equatable, Sendable {
 }
 
 public enum FetchPlan {
-    /// Required files, plus add-ons for confirmed SKUs only: no file is ever planned just to
+    /// Required files, plus the chosen voice-language packs, plus add-ons for confirmed SKUs only: no file is ever planned just to
     /// see whether Meta hands it out.
     public static func wantedFiles(recipe: Recipe, selection: FetchSelection) -> [RecipeFile] {
         var wanted = recipe.files.filter(\.required)
+        wanted += recipe.files.filter { f in !f.required && f.locale.map(selection.locales.contains) == true }
         if let addons = recipe.addons, addons.kind == .deliveredAssets {
             wanted += addons.items.filter { selection.ownedSKUs.contains($0.sku) }.map { $0.asFile(dest: addons.dest) }
         }

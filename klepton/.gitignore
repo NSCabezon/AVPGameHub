@@ -31,6 +31,11 @@
 /vampire/
 /zix/*
 /zix/
+# a SYMLINK to the main checkout's unpacked tree in worktrees, hence the bare form
+/ieytd
+/ieytd/
+/ktane
+/ktane/
 /intotheradius/*
 /intotheradius/
 /cs1/*
@@ -114,3 +119,5 @@ tools/__pycache__/
 # the start picture from the owner's own copy of the game at build time.
 visionos/Assets.xcassets/AppIcon-*.solidimagestack/
 visionos/Assets.xcassets/StartHero-*.imageset/
+/batman
+/batman/

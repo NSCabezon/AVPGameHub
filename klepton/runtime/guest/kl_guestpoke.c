@@ -194,6 +194,22 @@ static int addr_mapped(const void *p, size_t len) {
 struct poke_cap_row { const char *ver; uint32_t singleton; uint32_t field; int use;
                       const char *target; };
 static const struct poke_cap_row k_poke_caps[] = {
+    // Unity 2019.4.21f1 — I Expect You To Die 1.2.174682 (2026-10-08). BEFORE
+    // the bare "2019.4" row below, which would otherwise claim it by prefix and
+    // aim at Beat Saber's singleton. Same recipe:
+    //   0xdf3514  "OpenGL Error: Invalid texture unit!"
+    //   0x8b7370  bl 0x2ae9c4            ; the singleton getter
+    //   0x8b7374  ldr w8, [x0, #0xe8]    ; the cap
+    //   0x8b7378  cmp w8, w22 / b.ls     ; reject units >= cap
+    //   0x2ae9c4  adrp x8, 0x1101000 / ldr x0, [x8, #0x480]
+    // USED, unlike Beat Saber's row, because here the raise was measured
+    // rather than feared: at 32 the engine refused ~100 binds a frame and the
+    // language room drew its console as unlit black slabs with blank labels;
+    // at 64 there are zero rejects, no new GL error under KL_GLFB_ERRPROBE,
+    // the room renders correctly, and 6000 headless frames plus ~2300 viewer
+    // frames ran clean. Beat Saber's poisoning needed a unit at or past the
+    // combined limit (64..67); nothing here reaches it.
+    { "2019.4.21f1", 0x1101480, 0xe8, 1, "ieytd" },
     // Unity 2019.4.36f1 — Eye of the Temple 1.528 (2026-10-10). 1.28 million
     // "Invalid texture unit!" in 45 seconds at the cap of 32, and every texture
     // in the game black. Measured by the recipe above against this build's
@@ -265,7 +281,13 @@ static const struct poke_cap_row k_poke_caps[] = {
     // 0x10cd2c0 lands in the last RW LOAD's BSS (va 0x104ef20, filesz 0x19180 <
     // memsz 0x103c60), a singleton pointer filled at runtime. Used on this
     // title only; another title on the same build is told it was declined.
-    { "2022.3.62f3", 0x10cd2c0, 0xec, 1, "x2010043642376517" },
+    // Keyed on THIS repo's target name, "ktane" (standalone and in the hub
+    // alike). The row came over from avp-play keyed on its store-row name
+    // "x2010043642376517", which no target here carries, so the raise never
+    // applied: 53k rejects in a 5000-frame run and every TextMeshPro glyph
+    // drawn as a solid quad (the SDF sampler read a stale unit-0 texture).
+    // At 64: zero rejects and the text renders (2026-10-12).
+    { "2022.3.62f3", 0x10cd2c0, 0xec, 1, "ktane" },
 };
 #define POKE_NROWS (sizeof k_poke_caps / sizeof k_poke_caps[0])
 

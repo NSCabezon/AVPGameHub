@@ -50,6 +50,19 @@ enum KLCatalog {
         // Meta only (Steam's Beat Saber is Windows-only): the Quest build 1.40.8_7379 — APK, main OBB
         // and the DLC song packs the account bought.
         KLCatalogEntry(target: "beatsaber", display: "Beat Saber", steamApp: nil, metaRecipe: "beatsaber"),
+        // Meta only (a Quest 3 exclusive): the Quest build 1.4.1-350961 — APK, main OBB, audio OBBs,
+        // videos and the 69 Addressables bundles (18.3 GB); voice-language packs are opt-in.
+        KLCatalogEntry(target: "batman", display: "Batman: Arkham Shadow", steamApp: nil, metaRecipe: "batman"),
+        // Meta only (the Steam build is PC VR): the Quest build 1.2.174682 — a single APK, no OBB;
+        //        byte-identical to the APK this port is translated from.
+        KLCatalogEntry(target: "ieytd", display: "I Expect You To Die", steamApp: nil, metaRecipe: "ieytd"),
+        // Meta only (the Steam build is PC VR): the Quest build 1.10.15 (versionCode 87) — a single
+        //        150 MB APK, no OBB; byte-identical to the APK this port is translated from.
+        KLCatalogEntry(target: "ktane", display: "Keep Talking and Nobody Explodes", steamApp: nil, metaRecipe: "ktane"),
+        // Steam only: the Steam Frame build (depot 2669412 = Impact-Android-Shipping-arm64.apk,
+        //        com.vertigogames.ImpactDevelopment 944116, + 14 OBBs, 19.2 GB). The Quest build on
+        //        Meta's store is a different APK and is not what this port is translated from.
+        KLCatalogEntry(target: "metro", display: "Metro Awakening", steamApp: 2669410, metaRecipe: nil),
     ]
 
     static func entry(_ target: String) -> KLCatalogEntry? { entries.first { $0.target == target } }
@@ -110,6 +123,59 @@ enum KLCatalog {
     }
 
     static func metaStore(_ target: String) -> GameStore { GameStore(root: Paths.containerURL(for: target)) }
+
+    /// The default voice-language packs (Batman ships its dialogue as one OBB per language and
+    /// asks the platform whether the one for its language is installed — and offers to download
+    /// it, which it cannot do here): the game's own language setting, else the headset's
+    /// languages, matched against the recipe's packs, plus en-US. Empty for a recipe without packs.
+    static func metaDefaultVoiceLocales(_ target: String, _ recipe: Recipe) -> Set<String> {
+        let preferred = KLGameSettingsStore.language(for: target).locale.map { [$0] } ?? Locale.preferredLanguages
+        return recipe.defaultVoiceLocales(preferred: preferred)
+    }
+
+    /// The pack for the player's language (the "recommended" one on the game's page): the default
+    /// pick without en-US, or en-US itself when that is the player's language.
+    static func metaRecommendedVoiceLocale(_ target: String, _ recipe: Recipe) -> String? {
+        let d = metaDefaultVoiceLocales(target, recipe)
+        return d.subtracting(["en-US"]).first ?? d.first
+    }
+
+    private static func voiceLocalesKey(_ target: String) -> String { "klepton.meta.voicePacks.\(target)" }
+
+    /// The packs this game is installed with: fetched with the base game, part of "installed",
+    /// and what "Download all" fetches. The player's own choice on the game's page ("Voice
+    /// languages") once there is one, else the defaults (metaDefaultVoiceLocales).
+    static func metaVoiceLocales(_ target: String, _ recipe: Recipe) -> Set<String> {
+        if let stored = UserDefaults.standard.stringArray(forKey: voiceLocalesKey(target)) {
+            return Set(stored).intersection(recipe.voiceLocales)
+        }
+        return metaDefaultVoiceLocales(target, recipe)
+    }
+
+    static func hasStoredMetaVoiceLocales(_ target: String) -> Bool {
+        UserDefaults.standard.stringArray(forKey: voiceLocalesKey(target)) != nil
+    }
+
+    /// Remember the packs chosen for this game (nil = back to the defaults).
+    static func setMetaVoiceLocales(_ locales: Set<String>?, for target: String) {
+        if let locales { UserDefaults.standard.set(locales.sorted(), forKey: voiceLocalesKey(target)) }
+        else { UserDefaults.standard.removeObject(forKey: voiceLocalesKey(target)) }
+    }
+
+    /// A voice pack's language, as the game's page names it.
+    static func voicePackName(_ locale: String) -> String {
+        switch locale {
+        case "de-DE": return klL("German", "Alemán")
+        case "en-US": return klL("English", "Inglés")
+        case "es-ES": return klL("Spanish (Spain)", "Español (España)")
+        case "es-419": return klL("Spanish (Latin America)", "Español (Latinoamérica)")
+        case "fr-FR": return klL("French", "Francés")
+        case "it-IT": return klL("Italian", "Italiano")
+        case "ja-JP": return klL("Japanese", "Japonés")
+        case "ko-KR": return klL("Korean", "Coreano")
+        default: return Locale.current.localizedString(forIdentifier: locale) ?? locale
+        }
+    }
     #endif
 
     // MARK: Which store's data a game boots from
@@ -121,7 +187,7 @@ enum KLCatalog {
         if stores(target).contains(.steam), let d = SteamGames.descriptor(for: target), d.status().isComplete { out.append(.steam) }
         #endif
         #if canImport(MetaStore)
-        if let r = metaRecipe(target), metaStore(target).isComplete(r) { out.append(.meta) }
+        if let r = metaRecipe(target), metaStore(target).isComplete(r, locales: metaVoiceLocales(target, r)) { out.append(.meta) }
         #endif
         return out
     }

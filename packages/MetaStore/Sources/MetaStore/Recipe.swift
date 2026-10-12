@@ -40,11 +40,13 @@ public struct RecipeFile: Codable, Sendable, Hashable {
     public var dest: String
     /// Different file name at the destination (nil = `name`).
     public var localName: String?
+    /// Voice-language pack (e.g. "en-US"): optional, fetched only when asked for.
+    public var locale: String?
 
     public init(name: String, role: String, id: String, size: Int64?, sha256: String?, required: Bool,
-                dest: String, localName: String? = nil) {
+                dest: String, localName: String? = nil, locale: String? = nil) {
         self.name = name; self.role = role; self.id = id; self.size = size; self.sha256 = sha256
-        self.required = required; self.dest = dest; self.localName = localName
+        self.required = required; self.dest = dest; self.localName = localName; self.locale = locale
     }
 
     public var localFileName: String { localName ?? name }
@@ -123,6 +125,11 @@ extension Recipe {
             if let s = f.size, s < 0 { throw RecipeError.invalid("size of '\(f.name)'") }
             // A required file without a checksum would accept anything Meta sends.
             if f.required, f.sha256 == nil || f.size == nil { throw RecipeError.invalid("'\(f.name)' needs size and sha256") }
+            // A language pack is opt-in and never downloaded unverified.
+            if f.locale != nil {
+                guard !f.required else { throw RecipeError.invalid("language pack '\(f.name)' must be optional") }
+                guard f.sha256 != nil, f.size != nil else { throw RecipeError.invalid("language pack '\(f.name)' needs size and sha256") }
+            }
         }
     }
 
@@ -135,6 +142,49 @@ extension Recipe {
         if s.isEmpty { return true }
         if s.hasPrefix("/") || s.contains("\\") || s.contains("\0") { return false }
         return s.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." && !$0.hasPrefix(".") }
+    }
+
+    /// The required files plus the voice-language packs in `locales` (what a game needs on disk
+    /// to be complete in those languages).
+    public func files(locales: Set<String>) -> [RecipeFile] {
+        files.filter { $0.required || $0.locale.map(locales.contains) == true }
+    }
+
+    /// The voice-language packs this recipe offers.
+    public var voiceLocales: [String] { files.compactMap(\.locale) }
+
+    /// The packs to fetch by default for a player whose languages are `preferred` (most preferred
+    /// first, BCP-47 or POSIX spelling: "es-ES", "es_MX", "es"): the closest pack for the first
+    /// preferred language the recipe has one for, plus en-US when the recipe has it (the base
+    /// language most games fall back to). Empty for a recipe without packs.
+    public func defaultVoiceLocales(preferred: [String]) -> Set<String> {
+        let offered = voiceLocales
+        guard !offered.isEmpty else { return [] }
+        var out = Set<String>()
+        if offered.contains("en-US") { out.insert("en-US") }
+        for tag in preferred {
+            if let m = Recipe.closestLocale(to: tag, in: offered) { out.insert(m); break }
+        }
+        return out
+    }
+
+    /// `tag` matched against `offered`: the same tag; else, for Spanish outside Spain, es-419;
+    /// else the language's own country (es-ES, fr-FR, ja-JP); else any pack of that language.
+    static func closestLocale(to tag: String, in offered: [String]) -> String? {
+        let parts = tag.replacingOccurrences(of: "_", with: "-").split(separator: "-").map(String.init)
+        guard let lang = parts.first?.lowercased(), !lang.isEmpty else { return nil }
+        // Region: the first 2-letter or 3-digit subtag after the language (skips a script like Hans).
+        let region = parts.dropFirst().first { $0.count == 2 || ($0.count == 3 && $0.allSatisfy(\.isNumber)) }?.uppercased()
+        func split(_ o: String) -> (String, String?) {
+            let p = o.split(separator: "-").map(String.init)
+            return (p[0].lowercased(), p.count > 1 ? p[1].uppercased() : nil)
+        }
+        let same = offered.filter { split($0).0 == lang }
+        guard !same.isEmpty else { return nil }
+        if let region, let exact = same.first(where: { split($0).1 == region }) { return exact }
+        if lang == "es", let region, region != "ES", let latam = same.first(where: { split($0).1 == "419" }) { return latam }
+        if let home = same.first(where: { split($0).1 == lang.uppercased() }) { return home }
+        return same.sorted().first
     }
 
     public static func decode(_ data: Data) throws -> Recipe {

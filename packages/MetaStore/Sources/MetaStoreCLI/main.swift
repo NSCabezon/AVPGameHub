@@ -6,9 +6,10 @@
 //   metastore whoami                   the Meta user id the token belongs to
 //   metastore owned                    which built-in recipes this account owns (5 s between requests)
 //   metastore recipes                  the built-in recipes (offline)
-//   metastore fetch <recipe> [--apk-only] [--out DIR|FILE.apk]
+//   metastore fetch <recipe> [--apk-only] [--locale CODE]... [--out DIR|FILE.apk]
 //                                      a recipe's files to the Mac, verified + resumable — for building
 //                                      a port (translation) ONLY; the headset downloads game data itself
+//                                      (--locale en-US: also that voice-language pack, repeatable; off by default)
 //   metastore push-token [--device ID] [--bundle ID]
 //                                      copy the token into the hub's container (one-time import file)
 //
@@ -63,10 +64,12 @@ func usage() -> Never {
       logout                              forget the token on this Mac
       whoami                              print the Meta user id
       owned                               built-in recipes this account owns
+      owns <appId>...                     whether this account owns the given Meta app ids
       recipes                             list built-in recipes (offline)
-      fetch <recipe> [--apk-only] [--out DIR|FILE.apk]
+      fetch <recipe> [--apk-only] [--locale CODE]... [--out DIR|FILE.apk]
                                           download a recipe's files to the Mac for TRANSLATION only
                                           (beatsaber --apk-only defaults to $KLEPTON_DIR/beatsaber-<version>.apk)
+                                          --locale CODE: also a voice-language pack (e.g. en-US), repeatable
       push-token [--device ID] [--bundle ID]
                                           copy the token to the hub on the headset (default $KLEPTON_DEVICE, $KLEPTON_BUNDLE_ID)
     """)
@@ -120,6 +123,21 @@ case "owned":
         }
     }
 
+case "owns":
+    // Ownership of arbitrary app ids (a candidate port), without printing the account's id.
+    let ids = Array(args.dropFirst())
+    guard !ids.isEmpty else { usage() }
+    let t = token()
+    runAsync {
+        let client = MetaClient(token: t)
+        let gate = RequestGate()
+        let user = try await gate.run { try await client.me() }
+        for id in ids {
+            let owned = try await gate.run { try await client.ownsApp(appId: id, userId: user) }
+            print("\(owned ? "owned    " : "not owned") app \(id)")
+        }
+    }
+
 case "recipes":
     for r in Recipes.all {
         let bytes = r.files.reduce(Int64(0)) { $0 + ($1.size ?? 0) }
@@ -132,6 +150,17 @@ case "fetch":
         fail("fetch needs a recipe id: " + Recipes.all.map(\.id).joined(separator: ", "))
     }
     let apkOnly = args.contains("--apk-only")
+    var locales = Set<String>()
+    for (i, a) in args.enumerated() where a == "--locale" {
+        guard i + 1 < args.count else { fail("--locale needs a code") }
+        locales.insert(args[i + 1])
+    }
+    if apkOnly { locales = [] }
+    let available = Set(recipe.files.compactMap(\.locale))
+    if let bad = locales.subtracting(available).sorted().first {
+        fail("'\(bad)' is not a language of \(recipe.id); available: "
+             + (available.isEmpty ? "none" : available.sorted().joined(separator: ", ")))
+    }
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     let out = option("--out", in: args).map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, relativeTo: cwd).standardizedFileURL }
         ?? MacFetch.defaultOut(recipe: recipe, apkOnly: apkOnly,
@@ -148,7 +177,7 @@ case "fetch":
         print("\(r.title) \(r.versionName) (\(r.versionCode)) is owned by Meta user \(user). For translation only.")
         let store = GameStore(root: layout.root)
         let record = store.loadRecord()
-        let plan = FetchPlan.plan(recipe: r, selection: FetchSelection(withheld: Set(record?.withheld ?? [])),
+        let plan = FetchPlan.plan(recipe: r, selection: FetchSelection(withheld: Set(record?.withheld ?? []), locales: locales),
                                   record: record, state: store.state(of:))
         let last = LockedInt()
         let summary = try await Fetcher(client: client, store: store, gate: gate).run(plan, recipe: r, progress: { p in
@@ -158,7 +187,7 @@ case "fetch":
                 fflush(stdout)
             }
         }, log: { print("\n" + $0) })
-        guard store.isComplete(r) else { throw FetchError.sizeMismatch(name: r.id, expected: 0, actual: 0) }
+        guard store.isComplete(r, locales: locales) else { throw FetchError.sizeMismatch(name: r.id, expected: 0, actual: 0) }
         if let dst = layout.apkFile, let apk = r.apk {
             let fm = FileManager.default
             try? fm.removeItem(at: dst)

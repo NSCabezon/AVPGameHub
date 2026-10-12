@@ -1433,8 +1433,11 @@ final class KleptonControllers {
                 if pressed("Button B") { bits |= OVRPRawButton.y }
                 if touched("Button A") { touch |= OVRPRawButton.x }
                 if touched("Button B") { touch |= OVRPRawButton.y }
+                if Self.triggerTouch, touched("Trigger") || st.indexTrigger > Self.triggerTouchMin {
+                    touch |= OVRPRawButton.lIndexTrigger
+                }
                 if pressed("Thumbstick Button") { bits |= OVRPRawButton.lThumbstick }
-                if st.indexTrigger > 0 { bits |= OVRPRawButton.lIndexTrigger }
+                if st.indexTrigger > Self.triggerPressMin { bits |= OVRPRawButton.lIndexTrigger }
                 if st.handTrigger  > 0 { bits |= OVRPRawButton.lHandTrigger }
                 if menuish { bits |= OVRPRawButton.start }
                 if homeish { bits |= OVRPRawButton.back }
@@ -1443,8 +1446,11 @@ final class KleptonControllers {
                 if pressed("Button B") { bits |= OVRPRawButton.b }
                 if touched("Button A") { touch |= OVRPRawButton.a }
                 if touched("Button B") { touch |= OVRPRawButton.b }
+                if Self.triggerTouch, touched("Trigger") || st.indexTrigger > Self.triggerTouchMin {
+                    touch |= OVRPRawButton.rIndexTrigger
+                }
                 if pressed("Thumbstick Button") { bits |= OVRPRawButton.rThumbstick }
-                if st.indexTrigger > 0 { bits |= OVRPRawButton.rIndexTrigger }
+                if st.indexTrigger > Self.triggerPressMin { bits |= OVRPRawButton.rIndexTrigger }
                 if st.handTrigger  > 0 { bits |= OVRPRawButton.rHandTrigger }
                 // Both bits on both hands. The Oculus Touch interaction profile
                 // splits the pair — the LEFT carries `menu/click` and no
@@ -2010,6 +2016,19 @@ final class KleptonControllers {
     /// See the thumbstick-touch and right-menu notes in pollButtons.
     static let stickTouch = klEnvOn("KL_SENSE_STICK_TOUCH", default: klTargetName() != "alyx")
     static let rightStart = klEnvOn("KL_SENSE_RIGHT_START", default: klTargetName() != "alyx")
+    /// **A finger resting on the trigger.** Games that pose the hand from the
+    /// trigger's capacitive touch (I Expect You To Die points the index finger
+    /// while it is OFF the trigger) only ever saw "touched" while the trigger
+    /// was being pulled, and a trigger whose resting value is not exactly 0
+    /// (one Sense controller reads a little above it) read as permanently
+    /// pulled, so that hand would not point. Use the Sense's own capacitive
+    /// reading on "Trigger", plus a small pull for controllers without one.
+    /// KL_SENSE_TRIGGER_TOUCH: default on except for our Alyx (OpenVR shim).
+    static let triggerTouch = klEnvOn("KL_SENSE_TRIGGER_TOUCH", default: klTargetName() != "alyx")
+    /// Pull below which the trigger is neither "touched" (without a capacitive
+    /// reading) nor "pressed": swallows the resting offset of a worn trigger.
+    static let triggerTouchMin: Float = 0.05
+    static let triggerPressMin: Float = klTargetName() == "alyx" ? 0 : 0.05
 
     // MARK: - The system pinch
 

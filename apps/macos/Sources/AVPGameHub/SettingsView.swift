@@ -21,7 +21,7 @@ struct SettingsView: View {
                     Button(L("Detectar", "Detect")) { Task { if let t = await AppSettings.detectTeam() { s.team = t } } }
                 }
                 field(L("Bundle id del hub (KLEPTON_BUNDLE_ID)", "Hub bundle id (KLEPTON_BUNDLE_ID)"), $s.bundleID,
-                      prompt: "com.example.hub") {
+                      prompt: "com.<you>.avpgamehub") {
                     Button(L("De targets.py", "From targets.py")) { Task { if let b = await s.detectBundleID() { s.bundleID = b } } }
                 }
                 field(L("Visor (KLEPTON_DEVICE)", "Headset (KLEPTON_DEVICE)"), $s.deviceID, prompt: "00008112-…") {

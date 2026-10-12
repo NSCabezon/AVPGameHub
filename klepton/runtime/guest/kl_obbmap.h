@@ -24,6 +24,12 @@ int kl_obbmap_icu_dir(const char *loose);
 int kl_obbmap_open(const char *loose, int flags);
 // A FILE* over an OBB bank/entry, for guests that read via stdio (Wwise).
 FILE *kl_obbmap_fopen(const char *loose, const char *mode);
+// Where a STORED entry's bytes really are: the OBB file and the absolute byte
+// window inside it. For consumers that open the container themselves rather
+// than through a guest fd (UE's MediaPlayer14 shim hands the loose path to
+// AVFoundation). 1 on success, 0 if loose is not a stored entry of ours.
+int kl_obbmap_resolve(const char *loose, char *obb_out, size_t cap,
+                      long long *data_off, long long *size);
 
 // Per-fd operations. Each sets *handled=1 and returns the result when fd is one
 // of ours, or *handled=0 (return value ignored) when it is a normal fd.
