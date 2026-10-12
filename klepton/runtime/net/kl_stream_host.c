@@ -49,6 +49,14 @@
 //   KL_STREAM_AUDIO=1            send the guest's sound to the headset (AUDIO)
 //   KL_STREAM_AUDIO_LOCAL=0      ...and also play it on the Mac (1); default
 //                                silent here while the tap is on
+//
+// The headset is told how the session is going without asking: STATUS once a
+// second (BOOTING from the HELLO until the first frame is encoded — Alyx's
+// boot is tens of seconds of no picture — then RUNNING), and BYE when the game
+// ends: the guest's own exit/_exit (kl_fault_add_exit_hook — Alyx's "Quit"
+// ends in _exit(0), past atexit), a host exit(), a fatal signal in the guest
+// (the fault reporter) or SIGINT/SIGTERM on m_boot. Without the BYE the
+// headset kept showing the last picture.
 #include "kl_stream_host.h"
 #include "kl_stream_proto.h"
 
@@ -72,6 +80,7 @@
 
 #include "kl_audio.h"
 #include "kl_env.h"
+#include "kl_fault.h"
 #include "kl_openvr.h"
 #include "kl_ovrp.h"
 #include "kl_openxr.h"
@@ -109,6 +118,7 @@ static struct {
     struct sockaddr_storage addr;
     socklen_t addr_len;
     double   last_heard;           // host time of the last POSE/HELLO from it
+    int      timed_out;            // went silent (not BYE): its POSEs resume it
     // what the encoder is asked for
     int      frame_w, frame_h, kbps;
     float    fps;
@@ -136,6 +146,10 @@ static uint32_t g_seq[16];         // per-type send sequence
 static uint32_t g_frame_id;
 static double g_pace_period, g_pace_next;   // KL_STREAM_LOCK_FPS (pace_wait)
 static volatile int g_pace_off;   // KL_STREAM_LOCK_AB: this half is free-running
+// STATUS: when the guest was started (kl_stream_host_run) and when its first
+// frame went to the encoder (0 = not yet: BOOTING).
+static volatile double g_t_boot, g_t_first_frame;
+static volatile int g_bye_sent;
 
 // pose_id -> host receipt time, for the pose-age statistic
 #define POSE_RING 1024
@@ -264,6 +278,52 @@ static int send_client(const void *buf, size_t n) {
 
 static void send_to(const struct sockaddr_storage *a, socklen_t al, const void *buf, size_t n) {
     sendto(g_fd, buf, n, 0, (const struct sockaddr *)a, al);
+}
+
+// BYE to the connected client, three times (UDP, nothing acks it), once per
+// process. Takes no lock and does no stdio, so the fault reporter can call it
+// from a signal handler and the exit hook from a guest thread that may be
+// anywhere: C is read as it stands (the process is ending; a torn read costs
+// at worst a BYE nobody hears, and the headset's own silence timeout covers
+// that). 1 if it was sent now.
+static int send_bye_now(void) {
+    if (__atomic_exchange_n(&g_bye_sent, 1, __ATOMIC_ACQ_REL)) return 0;
+    if (!C.active || g_fd < 0) return 0;
+    kl_stream_hdr bye;
+    hdr_init(&bye, KL_STREAM_BYE);
+    for (int i = 0; i < 3; i++) {
+        if (g_tx_fd_ok && g_tx_fd >= 0) send(g_tx_fd, &bye, sizeof bye, 0);
+        else sendto(g_fd, &bye, sizeof bye, 0, (const struct sockaddr *)&C.addr, C.addr_len);
+    }
+    return 1;
+}
+
+// The guest ended the process itself (kl_libc.c's exit doors): Alyx's Quit.
+static void on_guest_exit(int status) {
+    if (send_bye_now())
+        fprintf(stderr, SH "the game is exiting (status %d): BYE sent to the headset\n", status);
+}
+// A host-side exit() (main() returning, a fail path): the same.
+static void on_host_atexit(void) {
+    if (send_bye_now()) fprintf(stderr, SH "exiting: BYE sent to the headset\n");
+}
+// A fatal signal in the guest: kl_fault's report is running, the process dies next.
+static void on_fault_report(FILE *f) {
+    if (send_bye_now()) fprintf(f, SH "fatal signal: BYE sent to the headset\n");
+}
+
+// STATUS to the client: BOOTING until the first frame is encoded, then RUNNING.
+static void send_keepalive(double now) {
+    kl_stream_keepalive k;
+    memset(&k, 0, sizeof k);
+    hdr_init(&k.h, KL_STREAM_STATUS);
+    double first = g_t_first_frame;
+    k.state = first > 0 ? KL_STREAM_HOST_RUNNING : KL_STREAM_HOST_BOOTING;
+    double since = first > 0 ? first : g_t_boot;
+    k.seconds = since > 0 && now > since ? (float)(now - since) : 0.0f;
+    unsigned long long gf = kl_vulkan_frame_serial();
+    k.guest_frames = gf > 0xffffffffull ? 0xffffffffu : (uint32_t)gf;
+    send_client(&k, sizeof k);
 }
 
 static int bind_port_socket(int reuseport) {
@@ -445,6 +505,7 @@ static void on_hello(const kl_stream_hello *m, size_t n,
         C.fps = kl_env_float("KL_STREAM_FPS", lock_fps() > 0 ? lock_fps() : 60.0f);
         C.addr = *from; C.addr_len = fl;
         C.active = 1;
+        C.timed_out = 0;
         tx_fd_connect_locked();
         g_abr_kbps = kbps;
         g_abr_clean = 0;
@@ -474,9 +535,23 @@ static void on_pose(const kl_stream_pose *m, size_t n,
                     const struct sockaddr_storage *from, socklen_t fl) {
     if (n < sizeof *m) return;
     pthread_mutex_lock(&g_mu);
+    // A client that went silent past KL_STREAM_TIMEOUT_MS and then speaks
+    // again from the same socket was stalled, not gone: resume it with a
+    // keyframe. Its client never saw an end (PING/PONG kept flowing — only the
+    // POSEs stopped: on a Mac harness, a GPU stall in its frame loop while the
+    // game loaded a level) and would otherwise wait forever on a host that
+    // ignores its POSEs. A BYE or a new HELLO clears this.
+    int resumed = 0;
+    if (!C.active && C.timed_out && addr_eq(&C.addr, C.addr_len, from, fl)) {
+        C.active = 1;
+        C.timed_out = 0;
+        g_idr = 1;
+        resumed = 1;
+    }
     int ok = C.active && addr_eq(&C.addr, C.addr_len, from, fl);
     if (ok) C.last_heard = kl_stream_host_now();
     pthread_mutex_unlock(&g_mu);
+    if (resumed) fprintf(stderr, SH "client is back (POSE after a timeout): streaming resumed\n");
     if (!ok) return;
     uint64_t ns = mono_ns();
     g_pose_ring[m->pose_id % POSE_RING].id = m->pose_id;
@@ -558,6 +633,7 @@ static void on_packet(const uint8_t *buf, size_t n, const struct sockaddr_storag
         pthread_mutex_lock(&g_mu);
         int was = C.active && addr_eq(&C.addr, C.addr_len, from, fl);
         if (was) C.active = 0;
+        if (was || addr_eq(&C.addr, C.addr_len, from, fl)) C.timed_out = 0;
         pthread_mutex_unlock(&g_mu);
         if (was) fprintf(stderr, SH "client said BYE — streaming stopped, the guest keeps running\n");
         break;
@@ -678,7 +754,8 @@ static void stats_tick(double dt) {
 static void *net_thread(void *arg) {
     (void)arg;
     uint8_t buf[2048];
-    double t_stats = kl_stream_host_now(), t_ping = t_stats;
+    double t_stats = kl_stream_host_now(), t_ping = t_stats, t_keep = 0;
+    int keep_state = 0, keep_on = 0;
     double timeout = kl_env_int("KL_STREAM_TIMEOUT_MS", 2000) / 1000.0;
     for (;;) {
         // [0] the listening socket, [1] the video socket (the connected
@@ -707,12 +784,20 @@ static void *net_thread(void *arg) {
         double now = kl_stream_host_now();
         pthread_mutex_lock(&g_mu);
         int gone = C.active && now - C.last_heard > timeout;
-        if (gone) C.active = 0;
+        if (gone) { C.active = 0; C.timed_out = 1; }
         int on = C.active;
         pthread_mutex_unlock(&g_mu);
         if (gone)
             fprintf(stderr, SH "client timed out (no POSE for %.1f s) — streaming stopped, the "
-                            "guest keeps running\n", timeout);
+                            "guest keeps running (a POSE from it resumes)\n", timeout);
+        // STATUS: once a second, at once for a new client or a state change.
+        int st = g_t_first_frame > 0 ? KL_STREAM_HOST_RUNNING : KL_STREAM_HOST_BOOTING;
+        if (on && (!keep_on || st != keep_state || now - t_keep >= 1.0)) {
+            send_keepalive(now);
+            t_keep = now;
+            keep_state = st;
+        }
+        keep_on = on;
         if (on && now - t_ping >= 1.0) {
             kl_stream_ping p;
             memset(&p, 0, sizeof p);
@@ -842,6 +927,10 @@ int kl_stream_host_start(const char *guest) {
     pthread_t t;
     if (pthread_create(&t, NULL, net_thread, NULL)) { perror(SH "pthread_create"); return -1; }
     pthread_detach(t);
+    // Every way this process can end tells the headset (see the top).
+    kl_fault_add_exit_hook(on_guest_exit);
+    kl_fault_add_reporter(on_fault_report);
+    atexit(on_host_atexit);
     fprintf(stderr, SH "listening on UDP :%d (%s), guest '%s'\n", g_port, KL_STREAM_BONJOUR, g_guest);
     if (kl_env_on("KL_STREAM_AUDIO", 1)) {
         int local = kl_env_on("KL_STREAM_AUDIO_LOCAL", 0);
@@ -1324,6 +1413,7 @@ static void *frame_thread(void *arg) {
             }
             t_prev_enc = tn;
             g_frame_id++;
+            if (!said_first) g_t_first_frame = kl_stream_host_now();
             if (!said_first++)
                 fprintf(stderr, SH "first frame to the encoder: stage %d, pose_id %u, tangents "
                                 "L(%.3f %.3f %.3f %.3f) R(%.3f %.3f %.3f %.3f)\n", stage, m.pose_id,
@@ -1379,6 +1469,7 @@ static int preview_loop(const volatile int *quit) {
 
 int kl_stream_host_run(const volatile int *quit) {
     __atomic_store_n(&g_guest_running, 1, __ATOMIC_RELEASE);
+    g_t_boot = kl_stream_host_now();
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
     static frame_args fa;
@@ -1394,9 +1485,8 @@ int kl_stream_host_run(const volatile int *quit) {
     g_sig = 1;
     pthread_join(ft, NULL);
     // Tell the client we are going, then stop.
-    kl_stream_hdr bye;
-    hdr_init(&bye, KL_STREAM_BYE);
-    send_client(&bye, sizeof bye);
+    if (send_bye_now()) fprintf(stderr, SH "stopping (%s): BYE sent to the headset\n",
+                                g_sig ? "signal / preview closed" : "quit");
     kl_stream_enc_close();
     fprintf(stderr, SH "stopped: %llu frames encoded (%llu keyframes)\n", S.total_frames, S.total_key);
     return 0;

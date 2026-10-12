@@ -156,6 +156,7 @@ int  klb_lstat(const char *, void *);
 int  klb_fstat(int, void *);
 int  klb_sigaction(int, const void *, void *);
 int  klb_pthread_sigmask(int, const uint64_t *, uint64_t *);
+void klb__exit(int);                            // kl_libc.c: reports, runs the exit hooks
 
 static int h_errno_v;
 static int *klg___h_errno_location(void) { return &h_errno_v; }
@@ -1240,7 +1241,7 @@ static const klg_entry g_glibc[] = {
     D("in6addr_loopback", &in6addr_loopback),
 
     // process / system
-    D("_Exit", _Exit), D("getdtablesize", getdtablesize), D("getloadavg", getloadavg),
+    D("_Exit", klb__exit), D("getdtablesize", getdtablesize), D("getloadavg", getloadavg),
     D("backtrace", backtrace), D("backtrace_symbols", backtrace_symbols),
     D("getresuid", klg_getresuid), D("getresgid", klg_getresgid),
     D("get_nprocs", klg_get_nprocs), D("get_nprocs_conf", klg_get_nprocs),

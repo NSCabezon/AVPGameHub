@@ -14,6 +14,8 @@ final class AppModel {
     let build = BuildModel()
     let launch = LaunchModel()
     let sessions = SessionsModel()
+    let stream = StreamModel()
+    let saves = SavesModel()
 
     init() {
         let s = AppSettings()
@@ -23,6 +25,7 @@ final class AppModel {
     }
 
     func stopEverything() {
+        stream.stopForQuit()
         build.cancel()
         launch.stop()
         games.cancel()
@@ -32,7 +35,7 @@ final class AppModel {
 }
 
 enum Screen: String, CaseIterable, Identifiable {
-    case status, accounts, games, build, launch, sessions, settings
+    case status, accounts, games, build, launch, streaming, sessions, saves, settings
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -41,7 +44,9 @@ enum Screen: String, CaseIterable, Identifiable {
         case .games: return L("Juegos", "Games")
         case .build: return L("Compilar e instalar", "Build & Install")
         case .launch: return L("Lanzar y probar", "Launch & Test")
+        case .streaming: return L("Streaming", "Streaming")
         case .sessions: return L("Sesiones", "Sessions")
+        case .saves: return L("Partidas", "Saves")
         case .settings: return L("Ajustes", "Settings")
         }
     }
@@ -52,7 +57,9 @@ enum Screen: String, CaseIterable, Identifiable {
         case .games: return "gamecontroller"
         case .build: return "hammer"
         case .launch: return "play.circle"
+        case .streaming: return "dot.radiowaves.left.and.right"
         case .sessions: return "chart.xyaxis.line"
+        case .saves: return "externaldrive.badge.timemachine"
         case .settings: return "gearshape"
         }
     }
@@ -69,7 +76,9 @@ struct RootView: View {
                     HStack {
                         Text(s.title)
                         Spacer()
-                        if s == .build && app.build.running || s == .launch && app.launch.running || s == .games && app.games.running != nil {
+                        if s == .build && app.build.running || s == .launch && app.launch.running || s == .games && app.games.running != nil
+                            || s == .streaming && (app.stream.running || app.stream.building)
+                            || s == .saves && app.saves.running {
                             ProgressView().controlSize(.mini)
                         }
                     }
@@ -84,7 +93,9 @@ struct RootView: View {
             case .games: GamesView()
             case .build: BuildView()
             case .launch: LaunchView()
+            case .streaming: StreamingView()
             case .sessions: SessionsView()
+            case .saves: SavesView()
             case .settings: SettingsView()
             }
         }

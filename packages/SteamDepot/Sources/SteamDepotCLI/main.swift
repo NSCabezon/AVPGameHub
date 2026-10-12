@@ -33,6 +33,10 @@ struct Args {
     var vrOnly = false
     var json = false
     var refresh = false
+    /// Raw chunks fetched by another client, consumed before the network (DepotDownloadOptions.stagingDirectory).
+    var staging: String?
+    /// Write the chunk URLs the run would fetch to this file and stop before downloading.
+    var planOut: String?
 }
 
 func parseArgs() throws -> Args {
@@ -62,6 +66,8 @@ func parseArgs() throws -> Args {
         case "--vr-only": a.vrOnly = true
         case "--json": a.json = true
         case "--refresh": a.refresh = true
+        case "--staging": a.staging = try next(arg)
+        case "--plan-only": a.planOut = try next(arg)
         case "--verbose", "-v": a.verbose = true
         case "-h", "--help": print(usage); exit(0)
         default: throw CLIError("unknown argument \(arg)\n\(usage)")

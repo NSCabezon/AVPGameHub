@@ -12,6 +12,8 @@ struct GameRow: Identifiable {
     var translated: APKVersion?
     var frameworksBuilt = false
     var metaVersion: String?
+    /// The Meta recipe's versionCode, to tell "up to date" from "Meta has another build".
+    var metaCode: Int?
     var steamBuild: String?
     var owned: [StoreKind: Bool] = [:]
 }
@@ -58,6 +60,7 @@ final class GamesModel {
             rows[i].frameworksBuilt = FileManager.default.fileExists(atPath: k.appendingPathComponent("visionos/Frameworks/\(t)").path)
             if let id = rows[i].entry.metaRecipe, let recipe = Recipes.recipe(id: id) {
                 rows[i].metaVersion = "\(recipe.versionName) (\(recipe.versionCode))"
+                rows[i].metaCode = recipe.versionCode
             }
         }
     }
@@ -214,62 +217,79 @@ struct GamesView: View {
                 }
             }
             if !games.message.isEmpty { Text(games.message).foregroundStyle(.secondary) }
-            Table(games.rows) {
-                TableColumn(L("Juego", "Game")) { r in
-                    VStack(alignment: .leading) {
-                        Text(r.entry.display).bold()
-                        Text(r.entry.target).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                TableColumn(L("Tiendas", "Stores")) { r in
-                    HStack {
-                        ForEach(r.entry.stores) { s in
-                            Badge(text: s.label + ownedMark(r.owned[s]), color: ownedColor(r.owned[s]))
+            // Draggable divider: the table grows with the window instead of only the output.
+            VSplitView {
+                Table(games.rows) {
+                    TableColumn(L("Juego", "Game")) { r in
+                        VStack(alignment: .leading) {
+                            Text(r.entry.display).bold()
+                            Text(r.entry.target).font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                }
-                TableColumn(L("Traducido", "Translated")) { r in
-                    VStack(alignment: .leading) {
-                        Text(r.translated?.description ?? "—")
-                        if r.frameworksBuilt { Text(L("frameworks listos", "frameworks built")).font(.caption).foregroundStyle(.green) }
-                    }
-                }
-                TableColumn(L("En la tienda", "Store version")) { r in
-                    VStack(alignment: .leading) {
-                        if let m = r.metaVersion { Text("Meta \(m)") }
-                        if let b = r.steamBuild { Text("Steam build \(b)") }
-                        if r.metaVersion == nil && r.steamBuild == nil { Text("—") }
-                    }
-                }
-                TableColumn("") { r in
-                    HStack {
-                        ForEach(r.entry.apkStores) { s in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Button(L("Actualizar (\(s.label))", "Update (\(s.label))")) { confirm = (r.entry, s) }
-                                    .disabled(games.running != nil || !signedIn(s))
-                                    .help(signedIn(s) ? "" : L("Inicia sesión en \(s.label) en Cuentas", "Sign in to \(s.label) in Accounts"))
-                                if !signedIn(s) {
-                                    Text(L("Inicia sesión en \(s.label) (Cuentas)", "Sign in to \(s.label) (Accounts)"))
-                                        .font(.caption).foregroundStyle(.orange)
-                                }
+                    TableColumn(L("Tiendas", "Stores")) { r in
+                        HStack {
+                            ForEach(r.entry.stores) { s in
+                                Badge(text: s.label + ownedMark(r.owned[s]), color: ownedColor(r.owned[s]))
                             }
                         }
-                        if r.entry.apkStores.isEmpty {
-                            Text(L("el visor lo descarga", "headset downloads it")).font(.caption).foregroundStyle(.secondary)
+                    }
+                    TableColumn(L("Traducido", "Translated")) { r in
+                        VStack(alignment: .leading) {
+                            Text(r.translated?.description ?? "—")
+                            if r.frameworksBuilt { Text(L("frameworks listos", "frameworks built")).font(.caption).foregroundStyle(.green) }
+                        }
+                    }
+                    TableColumn(L("En la tienda", "Store version")) { r in
+                        VStack(alignment: .leading) {
+                            if let m = r.metaVersion { Text("Meta \(m)") }
+                            if let b = r.steamBuild { Text("Steam build \(b)") }
+                            if r.metaVersion == nil && r.steamBuild == nil { Text("—") }
+                        }
+                    }
+                    TableColumn("") { r in
+                        HStack {
+                            ForEach(fetchStores(r)) { s in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    // Meta's recipe pins a versionCode, so "up to date" is knowable; a Steam
+                                    // build id says nothing about the APK inside, so Steam only offers a
+                                    // re-fetch, never "Update" as if one were due.
+                                    let upToDate = s == .meta && r.metaCode != nil && r.metaCode == r.translated?.code
+                                    if upToDate {
+                                        Text(L("Al día ✓ (Meta)", "Up to date ✓ (Meta)")).font(.caption).foregroundStyle(.green)
+                                    }
+                                    Button(upToDate || s == .steam
+                                           ? L("Volver a traducir (\(s.label))", "Re-translate (\(s.label))")
+                                           : L("Actualizar (\(s.label))", "Update (\(s.label))")) { confirm = (r.entry, s) }
+                                        .controlSize(upToDate || s == .steam ? .small : .regular)
+                                        .disabled(games.running != nil || !signedIn(s))
+                                        .help(signedIn(s) ? "" : L("Inicia sesión en \(s.label) en Cuentas", "Sign in to \(s.label) in Accounts"))
+                                    if !signedIn(s) {
+                                        Text(L("Inicia sesión en \(s.label) (Cuentas)", "Sign in to \(s.label) (Accounts)"))
+                                            .font(.caption).foregroundStyle(.orange)
+                                    }
+                                }
+                            }
+                            if r.entry.apkStores.isEmpty {
+                                Text(L("el visor lo descarga", "headset downloads it")).font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
-            }
-            .frame(minHeight: 180, maxHeight: 260)
-            HStack {
-                Text(L("Salida", "Output")).font(.headline)
-                if let t = games.running {
-                    ProgressView().controlSize(.small)
-                    Text(t).foregroundStyle(.secondary)
-                    Button(L("Cancelar", "Cancel")) { games.cancel() }
+                .frame(minHeight: 180)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(L("Salida", "Output")).font(.headline)
+                        if let t = games.running {
+                            ProgressView().controlSize(.small)
+                            Text(t).foregroundStyle(.secondary)
+                            Button(L("Cancelar", "Cancel")) { games.cancel() }
+                        }
+                    }
+                    LogConsoleView(store: games.log, showFilters: false)
                 }
+                .padding(.top, 8)
+                .frame(minHeight: 120)
             }
-            LogConsoleView(store: games.log, showFilters: false)
         }
         .padding(20)
         .task { await games.refresh(settings: app.settings) }
@@ -282,6 +302,14 @@ struct GamesView: View {
             Text(L("Descarga el APK en este Mac y ejecuta el script de traducción (Ajustes) en Klepton. Sobrescribe el árbol del juego en Klepton.",
                    "Downloads the APK to this Mac and runs the translate script (Settings) in Klepton. It overwrites the game's tree in Klepton."))
         }
+    }
+
+    /// The store a game's APK comes from, by the hub's rule: owned in both → Steam, owned in one
+    /// → that one; ownership not known yet → every store that can supply an APK.
+    private func fetchStores(_ r: GameRow) -> [StoreKind] {
+        let owned = r.entry.apkStores.filter { r.owned[$0] == true }
+        if owned.contains(.steam) { return [.steam] }
+        return owned.isEmpty ? r.entry.apkStores : owned
     }
 
     private func signedIn(_ s: StoreKind) -> Bool { s == .steam ? app.steam.signedIn : app.meta.signedIn }

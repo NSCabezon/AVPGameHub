@@ -19,6 +19,8 @@ final class AppSettings {
     var downloadsPath: String { didSet { defaults.set(downloadsPath, forKey: "downloadsPath") } }
     var sessionsPath: String { didSet { defaults.set(sessionsPath, forKey: "sessionsPath") } }
     var translateScript: String { didSet { defaults.set(translateScript, forKey: "translateScript") } }
+    /// Game content directory per streamable game (target -> path), for the Mac stream host.
+    var streamContent: [String: String] { didSet { defaults.set(streamContent, forKey: "streamContent") } }
 
     nonisolated static let supportDir: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -60,6 +62,15 @@ final class AppSettings {
         downloadsPath = value("downloadsPath", Self.supportDir.appendingPathComponent("downloads").path)
         sessionsPath = value("sessionsPath", Self.supportDir.appendingPathComponent("sessions").path)
         translateScript = value("translateScript", Self.defaultTranslateScript)
+        streamContent = d.dictionary(forKey: "streamContent") as? [String: String] ?? [:]
+    }
+
+    /// The content path for a streamable game: the stored one, else detected (not stored until
+    /// the user picks one, so a later checkout layout is still found).
+    func streamContentPath(for entry: CatalogEntry) -> String {
+        if let v = streamContent[entry.target], !v.isEmpty { return v }
+        guard let info = entry.stream else { return "" }
+        return StreamLaunch.detectContent(klepton: kleptonURL, info: info) ?? ""
     }
 
     var kleptonURL: URL? {

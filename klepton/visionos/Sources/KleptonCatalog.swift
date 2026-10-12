@@ -9,7 +9,8 @@
 //
 // The library (KleptonHub.swift) checks ownership in each signed-in store and
 // offers only the store(s) that own the game as install options; owned in both,
-// the player picks (remembered per game). Owned nowhere: shown greyed as "not in
+// it uses Steam; owned in one, that one. There is no store picker. A store that
+// owns it only with a build the port can't run makes the card say "update needed". Owned nowhere: shown greyed as "not in
 // your library", never downloadable. A Meta source is also only offered when its
 // recipe is exactly the build the hub's port was translated from (package +
 // versionCode against the row's baked apktool.yml / AndroidManifest.xml) — another
@@ -78,16 +79,6 @@ enum KLCatalog {
         if metaRecipe(target) != nil { out.append(.meta) }
         #endif
         return out
-    }
-
-    // MARK: Store choice (per game)
-
-    private static func choiceKey(_ target: String) -> String { "kl.hub.store.\(target)" }
-    static func chosenStore(_ target: String) -> KLStore? {
-        UserDefaults.standard.string(forKey: choiceKey(target)).flatMap(KLStore.init(rawValue:))
-    }
-    static func choose(_ store: KLStore, for target: String) {
-        UserDefaults.standard.set(store.rawValue, forKey: choiceKey(target))
     }
 
     // MARK: The build the hub's port was translated from
@@ -192,13 +183,12 @@ enum KLCatalog {
         return out
     }
 
-    /// The store whose data Play uses: the chosen one if its data is complete, else the
-    /// only/first complete one, else the chosen one (or the game's first store).
+    /// The store whose data Play uses (offline): Steam's when complete, else the other complete
+    /// one, else the game's first store — the library's rule (HubLibraryModel.activeStore).
     static func activeStore(_ target: String) -> KLStore? {
         let installed = installedStores(target)
-        if let c = chosenStore(target), installed.contains(c) { return c }
-        if let first = installed.first { return first }
-        return chosenStore(target) ?? stores(target).first
+        if installed.contains(.steam) { return .steam }
+        return installed.first ?? stores(target).first
     }
 
     /// The downloaded APK the hub derives <row.apk> and <tree>/assets from (HubPrep), for

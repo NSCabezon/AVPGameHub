@@ -64,6 +64,19 @@ final class SteamAccount {
         } catch {}
     }
 
+    /// Logs on once with the saved token: says whether Steam still accepts it (and refreshes the
+    /// public name), the Steam twin of Meta's "Check session".
+    func checkSession() async {
+        guard signedIn else { return }
+        do {
+            let s = try await loggedOnSession()
+            let name = await s.personaName
+            await s.disconnect()
+            if let name { setPersona(name) }
+            message = L("Sesión de Steam válida ✓", "Steam session is valid ✓")
+        } catch { message = Privacy.redact("\(error)") }
+    }
+
     private var deviceName: String { "AVP Game Hub (\(Host.current().localizedName ?? "Mac"))" }
 
     func startQR() {
@@ -484,6 +497,8 @@ struct AccountsView: View {
                         Badge(text: L("Sin sesión", "Signed out"), color: .secondary)
                     }
                     Spacer()
+                    Button(L("Comprobar sesión", "Check session")) { Task { await steam.checkSession() } }
+                        .disabled(!steam.signedIn)
                     Button(L("Enviar al visor", "Send to headset")) { Task { await steam.sendToHeadset() } }
                         .disabled(!steam.signedIn)
                     Button(L("Cerrar sesión", "Sign out"), role: .destructive) { steam.signOut() }
@@ -570,13 +585,17 @@ struct AccountsView: View {
                             .onSubmit { startMetaLogin() }
                     }
                 }
-                HStack {
-                    Button(meta.running ? L("En curso…", "Running…") : L("Iniciar sesión con Meta", "Sign in with Meta")) { startMetaLogin() }
-                        .disabled(meta.running)
-                    if meta.running || meta.canRetryCode { Button(L("Cancelar", "Cancel")) { meta.cancelLogin(); metaCode = "" } }
-                    if !meta.running && !meta.canRetryCode && (metaEmail.isEmpty || metaPassword.isEmpty) {
-                        Text(L("Sin e-mail/contraseña: responde en Detalles.", "Without e-mail/password: answer in Details."))
-                            .font(.caption).foregroundStyle(.secondary)
+                // Signed in: Check / Send to headset / Sign out above are the controls; the
+                // sign-in row only comes back while a login runs or a code can be retried.
+                if !meta.signedIn || meta.running || meta.canRetryCode {
+                    HStack {
+                        Button(meta.running ? L("En curso…", "Running…") : L("Iniciar sesión con Meta", "Sign in with Meta")) { startMetaLogin() }
+                            .disabled(meta.running)
+                        if meta.running || meta.canRetryCode { Button(L("Cancelar", "Cancel")) { meta.cancelLogin(); metaCode = "" } }
+                        if !meta.running && !meta.canRetryCode && (metaEmail.isEmpty || metaPassword.isEmpty) {
+                            Text(L("Sin e-mail/contraseña: responde en Detalles.", "Without e-mail/password: answer in Details."))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
                 if meta.running || meta.awaitingCode || meta.canRetryCode {

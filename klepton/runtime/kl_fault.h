@@ -25,6 +25,15 @@ void kl_fault_install(void);
 #define KL_FAULT_MAX_REPORTERS 8
 void kl_fault_add_reporter(void (*fn)(FILE *));
 
+// Called when the GUEST ends the process on purpose — its exit / _exit /
+// quick_exit / _Exit (kl_libc.c's klb_exit_report), just before the real one
+// runs, on the guest's thread, with its status. `_exit` skips atexit handlers
+// and static destructors, so this is the only place a frontend hears that the
+// game quit: the stream host says BYE to the headset here. Up to
+// KL_FAULT_MAX_REPORTERS hooks; each must be quick and must not exit itself.
+void kl_fault_add_exit_hook(void (*fn)(int status));
+void kl_fault_run_exit_hooks(int status);
+
 // Walk and print an AAPCS64 frame chain, naming guest images and IL2CPP
 // methods. Pass NULL for `fp` to start at the caller. The fault handler does
 // this for a SIGNAL; this is the same walk for the ORDERLY aborts, where the

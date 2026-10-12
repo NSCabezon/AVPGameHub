@@ -43,7 +43,15 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
 - `KL_DYLIB_DIR=<dir>` — (`runtime/kl_image.c`) prefer `<dir>/<name>.dylib`
   (klepton-ld output) over the ELF when loading each guest library — how
   `make bootdylib*` runs the translated images. Unset, the runtime ELF loader
-  maps the `.so` directly.
+  maps the `.so` directly. `<dir>/<name>.framework/<name>` (the app bundle's
+  layout) is accepted too.
+- `KL_DYLIB_PREFIX=<p>` — (`runtime/kl_image.c`) the prefix every translated
+  library's FILE name carries in `KL_DYLIB_DIR`: the guest's `libunity.so`
+  resolves to `<dir>/<p>libunity.framework/<p>libunity`, and nothing unprefixed
+  is considered. Set by the app (`kl_app.c`) to `<target>__`, because every
+  game's translations sit flat in one `Frameworks/` (App Store rejects
+  subfolders there, ITMS-90432) and several games ship the same library names.
+  The guest never sees it. Unset on the host (`make dylibs` writes bare names).
 
 ## GL / null driver (`runtime/gfx/kl_egl.c`)
 
@@ -3428,7 +3436,8 @@ Read by the scripts themselves, never forwarded to the app.
   `visionos/targets.py`. It decides the guest libraries, the APK and asset tree
   that get staged, the bundle id, the display name and the **product name** —
   and with that the `.xcodeproj`, the `.app`, the derived-data directory and the
-  `Frameworks/<target>/` the translations are staged into, so two apps built
+  `visionos/Frameworks/<target>/` the translations are staged into (inside the
+  `.app` they are flat, `Frameworks/<target>__<lib>.framework`), so two apps built
   from this tree never write to the same place. Default `beatsaber`.
   `./build_run_vpro.sh <target>` sets it from its first bare argument, which is
   the shortest way to say which guest a device run is for — and the same table
@@ -3602,8 +3611,19 @@ keeps the old behaviour for targets that existed before the port, unless noted.
 - `KL_STREAM_MAX_KBPS=<n>` — HELLO's `max_bitrate_kbps` hint (default 0 = host decides).
 - `KL_STREAM_IDR_MIN_S=<s>` — minimum gap between IDR_REQUESTs (default 0.25);
   an unanswered one is repeated every 2x this.
-- `KL_STREAM_NOSIGNAL_S=<s>` — seconds without a decoded frame before the state
-  is "no signal" ("Sin señal del Mac" card). Default 1.
+- `KL_STREAM_NOSIGNAL_S=<s>` — seconds with NOTHING from the host (no VIDEO,
+  AUDIO, PING or STATUS keepalive) before the state is "no signal" ("Sin señal
+  del Mac" card). Default 3. (It used to be 1 s without a decoded frame, which
+  fired all through Alyx's boot — the host waits for HELLO, then the game
+  loads for tens of seconds with its intro sound already playing.) While the
+  host's STATUS says BOOTING the card is "Arrancando el juego en el Mac… (N s)";
+  a picture that stalls with the host alive is "Esperando la imagen…".
+- `KL_STREAM_LOST_S=<s>` — after video, this long with nothing from the host
+  ends the session (state ENDED, `end_reason` LOST: "Se perdió la conexión con
+  <Mac>"), as the host's BYE does ("La partida en el Mac ha terminado"): the
+  view fades to black over the last picture and, ~2 s later, the hub closes
+  the immersive space and goes back to the library. Default 5; 0 = never.
+  `KL_STREAM_LOST_BOOT_S` (30) is the same before the first picture.
 - `KL_STREAM_RCVBUF=<bytes>` — UDP receive buffer (default 8 MiB; a keyframe is
   a burst of hundreds of fragments).
 - `KL_STREAM_DECODE_BGRA=1` — decode to BGRA and blit the eyes (the v1 path).
@@ -3646,8 +3666,12 @@ parity packets; host and hub must both be v2 (a v1 hub is refused at HELLO).
   under a Mach real-time policy (experimental; no measurable gain on a loaded Mac).
 - `KL_STREAM_FPS` — encoder ExpectedFrameRate / HELLO_ACK target (default: the
   lock, or 60 with the lock off).
-- `KL_STREAM_SCALE=<f>` — encode at HELLO eye size × f (v1 behaviour). **Unset
-  (default)**: encode at what the guest actually SUBMITS (its rendered rect,
+- `KL_STREAM_SCALE=<f>` — encode at HELLO eye size × f (v1 behaviour). Setting
+  it at all — even `=1` — turns off the auto size below AND its megapixel cap:
+  the 2026-10-12 headset session ran with it set and encoded the full HELLO
+  size, 6144x2464 (15 MP), at ~26 fps with a 36 ms encode on an M1 Max; with
+  it unset the 7 MP cap holds 45 fps. Use it for a fixed size (`0.75` →
+  4608x1848). **Unset (default)**: encode at what the guest actually SUBMITS (its rendered rect,
   `kl_ovrp_submit_size`), the max over ~60 frames, adopted after 30 stable
   frames, then capped by:
   - `KL_STREAM_MAX_MPIX=7.0` — megapixels of the side-by-side frame (0 = no cap).
@@ -3697,6 +3721,14 @@ parity packets; host and hub must both be v2 (a v1 hub is refused at HELLO).
   requests, 1168 frames decoded; FEC 10 → 89 IDR, 3593; FEC 5 → 45 IDR, 3914.
 - `KL_STREAM_TEST_DROP=<p>` — drop this fraction of VIDEO packets (data and
   parity) before sending: loss tests.
+- Session status, no knobs: the host sends STATUS (`kl_stream_keepalive`, an
+  additive v2 type) once a second from the HELLO on — BOOTING until its first
+  frame is encoded, then RUNNING — and BYE (3x) whenever the process ends: the
+  guest's own `exit`/`_exit`/`quick_exit`/`_Exit` (`kl_fault_add_exit_hook`;
+  Alyx's Quit is `_exit(0)`, past atexit), a host `exit()`, a fatal signal in
+  the guest (the fault reporter) and SIGINT/SIGTERM. Loopback, real Alyx,
+  `KL_OPENVR_CMD_AT="30:quit"`: harness `--expect-end bye` ends ~0.1 s after the
+  guest's `_exit(0)`; SIGKILL on the host ends it 5 s later as "host silent".
 - `KL_STREAM_AUDIO=1` — **default on**: the guest's PCM (kl_audio's tap, before
   the Mac's resampler; Alyx = s16 stereo 44.1 kHz) goes to the headset as AUDIO
   packets of ~5 ms (additive message type in v2, no FEC). `0` = sound stays on
@@ -3713,4 +3745,8 @@ parity packets; host and hub must both be v2 (a v1 hub is refused at HELLO).
   plus the host's `KL_STREAM_FEC` (10) and `KL_STREAM_PACE_MS` (8),
   `KL_TESTHOST_HAPTICS_S` (seconds between test buzzes, 0 = never),
   `KL_TESTHOST_SECONDS` (run time then BYE, 0 = forever),
-  `KL_TESTHOST_LOWLAT` (1: try low-latency rate control).
+  `KL_TESTHOST_LOWLAT` (1: try low-latency rate control),
+  `KL_TESTHOST_BOOT_S` (after a new client's HELLO, no video for this long while
+  STATUS says BOOTING — a game loading), `KL_TESTHOST_VANISH=1` (end without a
+  BYE, as a host that died). `make streamtest` runs both against
+  `kl_stream_harness --expect-end bye|lost`.

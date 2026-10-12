@@ -25,6 +25,8 @@ public struct CatalogEntry: Identifiable, Hashable, Sendable {
     public let steamAPKName: String?
     /// MetaStore recipe id (Recipes.recipe(id:)).
     public let metaRecipe: String?
+    /// How Klepton hosts this game on the Mac for "Jugar desde el Mac" (nil = it cannot).
+    public var stream: StreamHostInfo? = nil
 
     public var stores: [StoreKind] {
         (steamApp != nil ? [.steam] : []) + (metaRecipe != nil ? [.meta] : [])
@@ -39,14 +41,83 @@ public struct CatalogEntry: Identifiable, Hashable, Sendable {
 public enum Catalog {
     public static let entries: [CatalogEntry] = [
         CatalogEntry(target: "alyx", display: "Half-Life: Alyx", steamApp: 546560,
-                     steamAPKDepot: nil, steamAPKName: nil, metaRecipe: nil),
+                     steamAPKDepot: nil, steamAPKName: nil, metaRecipe: nil,
+                     stream: StreamHostInfo(
+                        availability: .ready, bootTarget: "alyx",
+                        contentEnv: "KL_GLIBC_CONTENT", contentMarkers: ["hlvr", "core"],
+                        // visionos/stage_alyx.sh's default (KL_ALYX_CONTENT, else ../../game/content/game
+                        // from Klepton), then the public repo's gitignored local/ layout.
+                        contentOverrideEnv: "KL_ALYX_CONTENT",
+                        contentCandidates: ["../../game/content/game", "../../local/game/content/game"],
+                        environment: ["KL_GLIBC_ARGS": "-vr -vulkan -console +vr_fidelity_level_auto 0 +vr_fidelity_level 1"])),
         CatalogEntry(target: "superhot", display: "SUPERHOT VR", steamApp: 617830,
                      steamAPKDepot: 617833, steamAPKName: "shvr.apk", metaRecipe: "superhot"),
         CatalogEntry(target: "beatsaber", display: "Beat Saber", steamApp: nil,
                      steamAPKDepot: nil, steamAPKName: nil, metaRecipe: "beatsaber"),
+        CatalogEntry(target: "batman", display: "Batman: Arkham Shadow", steamApp: nil,
+                     steamAPKDepot: nil, steamAPKName: nil, metaRecipe: "batman"),
+        CatalogEntry(target: "metro", display: "Metro Awakening", steamApp: 2669410,
+                     steamAPKDepot: 2669412, steamAPKName: "Impact-Android-Shipping-arm64.apk", metaRecipe: nil,
+                     // `KL_STREAM_HOST=1 build/m_boot metro`: the guest tree is Klepton's `metro` link
+                     // (targets.py), no content dir, no extra env. Verified to the main menu on loopback.
+                     stream: StreamHostInfo(availability: .ready, bootTarget: "metro",
+                                            requiredKleptonPaths: ["metro"])),
+        CatalogEntry(target: "ieytd", display: "I Expect You To Die", steamApp: nil,
+                     steamAPKDepot: nil, steamAPKName: nil, metaRecipe: "ieytd"),
+        CatalogEntry(target: "ktane", display: "Keep Talking and Nobody Explodes", steamApp: nil,
+                     steamAPKDepot: nil, steamAPKName: nil, metaRecipe: "ktane"),
     ]
 
     public static func entry(_ target: String) -> CatalogEntry? { entries.first { $0.target == target } }
+
+    /// Games Klepton can host on the Mac for streaming (including not-yet-startable ones).
+    public static var streamable: [CatalogEntry] { entries.filter { $0.stream != nil } }
+}
+
+/// What starting the Mac stream host for one game takes: `KL_STREAM_HOST=1 build/m_boot <bootTarget>`
+/// in Klepton, plus the game's content directory (if it has one) and fixed environment.
+public struct StreamHostInfo: Hashable, Sendable {
+    public enum Availability: String, Hashable, Sendable {
+        /// Verified end to end.
+        case ready
+        /// Can be started, but no verified session yet.
+        case experimental
+        /// Listed, not startable.
+        case soon
+    }
+
+    public let availability: Availability
+    /// The m_boot target row (`build/m_boot <bootTarget>`).
+    public let bootTarget: String
+    /// Variable that carries the content directory (nil = the game needs none).
+    public let contentEnv: String?
+    /// Entries a content directory must hold to count as present.
+    public let contentMarkers: [String]
+    /// Environment variable the Klepton scripts read for the content path (checked first).
+    public let contentOverrideEnv: String?
+    /// Where the content usually is, relative to the Klepton checkout.
+    public let contentCandidates: [String]
+    /// Paths inside Klepton that must exist (guest trees, symlinks).
+    public let requiredKleptonPaths: [String]
+    /// Fixed variables for this game (on top of KL_STREAM_HOST / KL_STREAM_NAME).
+    public let environment: [String: String]
+
+    public init(availability: Availability, bootTarget: String, contentEnv: String? = nil,
+                contentMarkers: [String] = [], contentOverrideEnv: String? = nil,
+                contentCandidates: [String] = [], requiredKleptonPaths: [String] = [],
+                environment: [String: String] = [:]) {
+        self.availability = availability
+        self.bootTarget = bootTarget
+        self.contentEnv = contentEnv
+        self.contentMarkers = contentMarkers
+        self.contentOverrideEnv = contentOverrideEnv
+        self.contentCandidates = contentCandidates
+        self.requiredKleptonPaths = requiredKleptonPaths
+        self.environment = environment
+    }
+
+    public var needsContent: Bool { contentEnv != nil }
+    public var canStart: Bool { availability != .soon }
 }
 
 /// `python3 visionos/targets.py <target>` prints shell assignments (KLT_TREE=superhot,

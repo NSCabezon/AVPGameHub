@@ -42,6 +42,16 @@ public protocol MetaTransport: Sendable {
     func data(for request: URLRequest) async throws -> (Data, Int)
     /// A streamed download into `sink`.
     func download(_ request: URLRequest, into sink: DownloadSink) async throws
+    /// The first response to `request` WITHOUT following a redirect: its HTTP status and
+    /// `Location` header. The body is not read.
+    func firstResponse(for request: URLRequest) async throws -> (status: Int, location: String?)
+}
+
+public extension MetaTransport {
+    /// Transports that cannot stop at a redirect say so; callers then download in-process.
+    func firstResponse(for request: URLRequest) async throws -> (status: Int, location: String?) {
+        throw MetaError.transport("this transport cannot stop at a redirect")
+    }
 }
 
 // MARK: - Client
@@ -154,6 +164,66 @@ public struct MetaClient: Sendable {
         }
         if let f = sink.failure { throw f }
         return DownloadOutcome(bytesReceived: sink.received, totalSize: sink.total, resumed: sink.resumed)
+    }
+
+    /// Where a file's bytes can be fetched from.
+    public enum DownloadLocation: Sendable, Equatable {
+        /// Meta answered with a redirect to a CDN address on another host. That address carries
+        /// no credential of ours (the token only ever went as a header to Meta's own host), so it
+        /// can be handed to a system background download. It expires; ask again then.
+        case signed(URL)
+        /// Meta serves the file itself (no redirect), or the redirect is not one that can be
+        /// handed on safely: download it in-process with the token, as `download(id:)` does.
+        case direct
+    }
+
+    /// One request to securecdn for the file (counts like any other request: callers put it
+    /// through the RequestGate). The redirect is NOT followed and the body is not read.
+    /// 401/403/404 throw `.denied` (an add-on Meta does not deliver to this account), exactly as
+    /// `download(id:)` would.
+    public func resolveDownload(id: String) async throws -> DownloadLocation {
+        let a = try await downloadAnswer(id: id)
+        return try MetaClient.location(status: a.status, header: a.location, requestURL: MetaClient.downloadURL(id: id))
+    }
+
+    /// The raw first answer to a file request (status and Location header), redirect not followed.
+    /// For diagnostics (`metastore resolve`); the Location is a credential while it lasts, so
+    /// callers never print or log it whole.
+    public func downloadAnswer(id: String) async throws -> (status: Int, location: String?) {
+        guard MetaClient.isNumericID(id) else { throw MetaError.api(status: 0, message: "file id must be numeric") }
+        var request = MetaClient.request(MetaClient.downloadURL(id: id), token: token)
+        request.timeoutInterval = 60
+        // No Range: the request is exactly what a download sends; if Meta serves the file itself,
+        // the transport stops at the response headers.
+        do {
+            return try await transport.firstResponse(for: request)
+        } catch let e as MetaError {
+            throw e
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw MetaError.transport(Redaction.redact("\(error.localizedDescription)"))
+        }
+    }
+
+    /// The decision behind `resolveDownload`, testable without a network.
+    public static func location(status: Int, header: String?, requestURL: URL) throws -> DownloadLocation {
+        switch status {
+        case 301, 302, 303, 307, 308:
+            guard let header, let target = URL(string: header, relativeTo: requestURL)?.absoluteURL,
+                  target.scheme == "https", let host = target.host?.lowercased(), !host.isEmpty,
+                  host != graphHost, host != downloadHost else { return .direct }
+            // A credential in the address itself is never handed on (nor logged).
+            let names = URLComponents(url: target, resolvingAgainstBaseURL: false)?.queryItems?.map { $0.name.lowercased() } ?? []
+            if names.contains("access_token") { return .direct }
+            return .signed(target)
+        case 200, 206:
+            return .direct
+        case 401, 403, 404:
+            throw MetaError.denied(status: status)
+        default:
+            throw MetaError.unexpected(status: status)
+        }
     }
 
     // MARK: Helpers

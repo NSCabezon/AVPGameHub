@@ -135,15 +135,24 @@ static void build_index_from_translations(void) {
     if (!dir || !*dir || !g_ndirs) return;
     DIR *d = opendir(dir);
     if (!d) return;
+    // The directory is the bundle's Frameworks/, shared by every game a hub
+    // carries and by ANGLE, MoltenVK and the Swift runtime: only names carrying
+    // THIS game's prefix (kl_dylib_prefix; "<game>__") are its libraries, and the
+    // index knows each by the stem without it — the name the guest asks for and
+    // the one dylib_candidate maps back to the prefixed file.
+    const char *pfx = kl_dylib_prefix();
+    size_t pl = strlen(pfx);
     struct dirent *de;
     while ((de = readdir(d))) {
         char stem[256], bin[1280];
-        size_t n = strlen(de->d_name);
-        if (n > 10 && !strcmp(de->d_name + n - 10, ".framework")) {
-            snprintf(stem, sizeof stem, "%.*s", (int)(n - 10), de->d_name);
-            snprintf(bin, sizeof bin, "%s/%s/%s", dir, de->d_name, stem);
-        } else if (n > 6 && !strcmp(de->d_name + n - 6, ".dylib")) {
-            snprintf(stem, sizeof stem, "%.*s", (int)(n - 6), de->d_name);
+        if (strncmp(de->d_name, pfx, pl) != 0) continue;
+        const char *nm = de->d_name + pl;
+        size_t n = strlen(nm);
+        if (n > 10 && !strcmp(nm + n - 10, ".framework")) {
+            snprintf(stem, sizeof stem, "%.*s", (int)(n - 10), nm);
+            snprintf(bin, sizeof bin, "%s/%s/%s%s", dir, de->d_name, pfx, stem);
+        } else if (n > 6 && !strcmp(nm + n - 6, ".dylib")) {
+            snprintf(stem, sizeof stem, "%.*s", (int)(n - 6), nm);
             snprintf(bin, sizeof bin, "%s/%s", dir, de->d_name);
         } else continue;
         char so[128];

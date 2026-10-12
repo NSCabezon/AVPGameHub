@@ -171,5 +171,27 @@
 	     on a headset that is often not tethered to the Mac that built it. -->
 	<key>UIFileSharingEnabled</key>
 	<true/>
+
+	<!-- Export compliance, answered here so App Store Connect does not hold
+	     every TestFlight build at "Missing Compliance" until the question is
+	     answered by hand.
+
+	     NO, because what encryption there is is exempt:
+	       - the app's own code uses only the operating system's: URLSession
+	         and its wss:// WebSocket for HTTPS (Steam's CM, Meta's API),
+	         CommonCrypto for AES decryption of the depot chunks a store
+	         serves (decryption of content the user owns — copy protection),
+	         CryptoKit's SHA-1/SHA-256 for integrity checks, and Security's
+	         SecKey for the RSA step of the Steam login (authentication);
+	       - the runtime itself carries no cipher (kl_cacerts.c ships root
+	         CA certificates, which are not encryption);
+	       - the translated GAMES bring their own TLS stacks (libssl /
+	         libcrypto / unitytls) for their own HTTPS. That is ancillary
+	         to an entertainment product whose primary function is not
+	         information security — EAR Category 5 Part 2, Note 4.
+	     If that reading ever changes, flip this to true and answer the
+	     questionnaire in App Store Connect instead. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

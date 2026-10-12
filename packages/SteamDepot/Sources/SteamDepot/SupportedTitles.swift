@@ -113,11 +113,13 @@ public enum SupportedTitles {
         //                      546_564: 9_198_205_754_520_568_813,   // Linux binaries
         //                  ]))
         546560: SupportedTitle(target: "alyx", usesSteamBuild: true),
+        // SUPERHOT VR: the port is translated from the Steam Frame shvr.apk (depot 617833,
+        // 1.72); Meta sells a different app (1.161).
+        617830: SupportedTitle(target: "superhot", usesSteamBuild: true),
         // Quest-APK ports. On Steam: Beat Saber, BONELAB, Into the Radius VR and
-        // Vampire: Justice are Windows-only; SUPERHOT VR (617833), Open Brush (1634874) and
+        // Vampire: Justice are Windows-only; Open Brush (1634874) and
         // Red Matter 2 (2081472) also ship an Android depot for Steam Frame.
         620980: SupportedTitle(target: "beatsaber", usesSteamBuild: false),
-        617830: SupportedTitle(target: "superhot", usesSteamBuild: false),
         // Metro Awakening: the Steam Frame Android depot 2669412 (APK + 14 OBBs) is the
         // build Klepton's `metro` target is translated from.
         2669410: SupportedTitle(target: "metro", usesSteamBuild: true),

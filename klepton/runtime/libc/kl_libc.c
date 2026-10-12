@@ -2288,11 +2288,13 @@ int klb_uname(bionic_utsname *u) {
 // and the status code are all exactly as they were.
 //
 // `_exit` gets the same treatment and then bypasses the handlers, as it must.
+// Either way the frontends' exit hooks (kl_fault_add_exit_hook) run first.
 static void klb_exit_report(const char *which, int status) {
     fprintf(stderr, "\n[klepton] the guest called %s(%d) — the process is ending "
                     "here, on purpose, from:\n", which, status);
     kl_fault_print_frames(stderr, NULL);
     fflush(NULL);
+    kl_fault_run_exit_hooks(status);   // e.g. the stream host's BYE to the headset
 }
 void klb_exit(int status)  { klb_exit_report("exit", status);  exit(status); }
 void klb__exit(int status) { klb_exit_report("_exit", status); _exit(status); }

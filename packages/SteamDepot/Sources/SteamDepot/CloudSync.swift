@@ -360,10 +360,10 @@ public struct CloudSync: Sendable {
 
     public let remote: CloudRemote
     public let rules: [CloudSaveRule]
-    /// The folder a rule's root token maps to (lowercased token, e.g. `gameinstall`).
-    public let rootFolder: @Sendable (String) -> URL?
-    /// Maps a lowercased path below the root token to the path below `rootFolder` (nil = not here).
-    public let localPath: @Sendable (String) -> String?
+    /// A rule's folder on disk: (lowercased root token, e.g. `gameinstall`; the rule's path below it as
+    /// the rule spells it) -> the folder, in the case the game uses on disk; nil = the rule does not
+    /// apply here.
+    public let ruleFolder: @Sendable (_ root: String, _ path: String) -> URL?
     public let stateURL: URL
     public let backupRoot: URL
     public var mode: CloudSyncMode = .downloadOnly
@@ -373,17 +373,29 @@ public struct CloudSync: Sendable {
     public var now: @Sendable () -> Date = { Date() }
     public var log: @Sendable (String) -> Void = { _ in }
 
+    public init(remote: CloudRemote, rules: [CloudSaveRule], ruleFolder: @escaping @Sendable (_ root: String, _ path: String) -> URL?,
+                stateURL: URL, backupRoot: URL) {
+        self.remote = remote; self.rules = rules; self.ruleFolder = ruleFolder
+        self.stateURL = stateURL; self.backupRoot = backupRoot
+    }
+
+    /// `rootFolder`: the folder a lowercased root token maps to. `localPath`: the rule's path (as the
+    /// rule spells it) -> the path below that folder (nil = not here).
     public init(remote: CloudRemote, rules: [CloudSaveRule], rootFolder: @escaping @Sendable (String) -> URL?,
                 localPath: @escaping @Sendable (String) -> String? = { $0 }, stateURL: URL, backupRoot: URL) {
-        self.remote = remote; self.rules = rules; self.rootFolder = rootFolder; self.localPath = localPath
-        self.stateURL = stateURL; self.backupRoot = backupRoot
+        self.init(remote: remote, rules: rules, ruleFolder: { root, path in
+            guard let base = rootFolder(root), let rel = localPath(path) else { return nil }
+            return rel.isEmpty ? base : base.appendingPathComponent(rel, isDirectory: true)
+        }, stateURL: stateURL, backupRoot: backupRoot)
     }
 
     /// Steam writes root tokens in their canonical case, e.g. `GameInstall`.
     static func tokenName(_ root: String) -> String {
         ["gameinstall": "GameInstall", "winmydocuments": "WinMyDocuments", "winappdataroaming": "WinAppDataRoaming",
-         "winappdatalocal": "WinAppDataLocal", "winsavedgames": "WinSavedGames", "macappsupport": "MacAppSupport",
-         "linuxhome": "LinuxHome", "linuxxdgdatahome": "LinuxXdgDataHome"][root.lowercased()] ?? root
+         "winappdatalocal": "WinAppDataLocal", "winappdatalocallow": "WinAppDataLocalLow",
+         "winsavedgames": "WinSavedGames", "macappsupport": "MacAppSupport",
+         "linuxhome": "LinuxHome", "linuxxdgdatahome": "LinuxXdgDataHome",
+         "androidexternaldata": "AndroidExternalData"][root.lowercased()] ?? root
     }
 
     /// `%GameInstall%game/hlvr/save/x.sav` -> (gameinstall, game/hlvr/save/x.sav)
@@ -392,15 +404,17 @@ public struct CloudSync: Sendable {
         return (String(name[name.index(after: name.startIndex)..<end]).lowercased(), String(name[name.index(after: end)...]))
     }
 
-    /// A rule's folder on disk.
-    public func folder(for rule: CloudSaveRule) -> URL? {
-        guard let base = rootFolder(rule.root.lowercased()), let rel = localPath(rule.path.lowercased()) else { return nil }
-        return rel.isEmpty ? base : base.appendingPathComponent(rel, isDirectory: true)
-    }
+    /// A rule's folder on disk, in the rule's own spelling (data containers are case-sensitive: the
+    /// game only sees `UnrealGame/…/SaveGames`, never `unrealgame/…/savegames`). nil = the rule does
+    /// not apply here (e.g. another platform's root): its files are ignored both ways.
+    public func folder(for rule: CloudSaveRule) -> URL? { ruleFolder(rule.root.lowercased(), rule.path) }
+
+    /// The rules that have a folder here; the others' files are neither listed, planned nor written.
+    private var mappedRules: [CloudSaveRule] { rules.filter { folder(for: $0) != nil } }
 
     /// The rule that covers a cloud name, and the path below its folder.
     private func rule(forKey key: String) -> (CloudSaveRule, String)? {
-        for r in rules where key.hasPrefix(r.keyPrefix) {
+        for r in mappedRules where key.hasPrefix(r.keyPrefix) {
             let sub = String(key.dropFirst(r.keyPrefix.count))
             if !r.recursive, sub.contains("/") { continue }
             if r.matches(fileName: (sub as NSString).lastPathComponent) { return (r, sub) }
@@ -422,7 +436,7 @@ public struct CloudSync: Sendable {
     /// Every local file the rules cover, and the slot folders that hold any file.
     public func scanLocal() -> (files: [CloudLocalFile], urls: [String: URL], occupied: [String: Set<String>]) {
         var files: [CloudLocalFile] = [], urls: [String: URL] = [:], occupied: [String: Set<String>] = [:]
-        for rule in rules {
+        for rule in mappedRules {
             guard let dir = folder(for: rule), let e = FileManager.default.enumerator(atPath: dir.path) else { continue }
             for case let sub as String in e {
                 let u = dir.appendingPathComponent(sub)
@@ -477,10 +491,18 @@ public struct CloudSync: Sendable {
         try? fm.setAttributes([.modificationDate: time], ofItemAtPath: url.path)
     }
 
-    /// Where a cloud file goes on disk when nothing local has its name (lowercase, as the game writes).
-    private func destination(forKey key: String) -> URL? {
+    /// Where a cloud file goes on disk when nothing local has its name: below the rule's folder, in the
+    /// cloud name's own spelling (`S0PlayerSettings.sav` stays that, as the game wrote it elsewhere).
+    func destination(for remote: CloudFile) -> URL? {
+        let key = remote.filename.lowercased()
         guard let (r, sub) = rule(forKey: key), let dir = folder(for: r) else { return nil }
-        return dir.appendingPathComponent(sub)
+        // The original spelling of the part below the rule's folder: drop the rule path's components
+        // ("/" is never changed by lowercasing). If that does not give back the same name in any case,
+        // fall back to the lowercased sub (never a different file).
+        let path = Self.split(remote.filename).path.split(separator: "/", omittingEmptySubsequences: false)
+        let ruleDepth = r.path.split(separator: "/", omittingEmptySubsequences: false).count
+        let orig = path.count > ruleDepth ? path.dropFirst(ruleDepth).joined(separator: "/") : ""
+        return dir.appendingPathComponent(orig.lowercased() == sub ? orig : sub)
     }
 
     /// Run a sync. `dryRun`: plan only (only the cloud listing is read; nothing is written anywhere).
@@ -540,7 +562,7 @@ public struct CloudSync: Sendable {
                 state.files[key] = .init(synced: sha, local: sha)
             case .download(let key, let r, let replacing):
                 try Task.checkCancellation()
-                guard let dest = urls[key] ?? destination(forKey: key) else { continue }
+                guard let dest = urls[key] ?? destination(for: r) else { continue }
                 let data = try await remote.download(r)
                 try Task.checkCancellation()
                 let sha = CloudSHA.hex(data)
@@ -604,31 +626,98 @@ public struct CloudSync: Sendable {
     }
 }
 
-/// Where a Klepton port keeps one game's cloud-covered files.
+/// Where a Klepton port keeps one game's cloud-covered files: per Auto-Cloud root token, which local
+/// folder it stands for and how the rule's path maps below it. Roots a profile does not map (another
+/// platform's rules) are ignored both ways.
 ///
-/// Half-Life: Alyx: the guest's game root is `<install>/game` (kl_glibc's g_root is two levels above
-/// game/bin/linuxsteamrtarm64), and everything the engine writes under it lands in the WRITE LAYER
-/// (`KL_GLIBC_WRITE`, default `<userdata>/alyx/gameroot`, i.e.
-/// `~/Library/Application Support/Klepton/userdata/alyx/gameroot` — on the headset, inside the app
-/// container). The Auto-Cloud rule `gameinstall` + `game/hlvr/save` is therefore
-/// `<write layer>/hlvr/save`.
+/// Local folders (`Base`), per game target `<t>`:
+/// - `writeLayer` — kl_glibc's write layer (`KL_GLIBC_WRITE`, default `<userdata>/gameroot`): on the
+///   Mac `~/Library/Application Support/Klepton/userdata/<t>/gameroot`; on the headset the same path
+///   below the app's data container (its home).
+/// - `androidFiles` — the guest's Android files dir (`getFilesDir`/`getExternalFilesDir`, which
+///   Klepton maps to the same folder): on the Mac `~/Library/Application Support/Klepton/userdata/<t>`
+///   (kl_userdata_dir, `KL_FILES_DIR` overrides it); in the hub `<game root>/android-files`, game
+///   root = `<container>/Documents/games/<t>` (kl_app.c `g_files`).
+///
+/// Half-Life: Alyx: the guest's game root is `<install>/game` and everything the engine writes under
+/// it lands in the write layer, so `gameinstall` + `game/hlvr/save` is `<write layer>/hlvr/save`.
+/// SUPERHOT VR: `WinAppDataLocalLow` + `SUPERHOT_Team/SUPERHOT_VR`, `*.hot`; Steam's Android root
+/// override maps it to `Android/data/com.superhotgame.superhotvr/files/` (Unity's persistentDataPath)
+/// and keeps the Windows token in the cloud name, so PC and headset share the save:
+/// `<android files>/files/VRsuper.hot`.
+/// Metro Awakening: only the Android rule (`AndroidExternalData` +
+/// `Android/data/com.vertigogames.ImpactDevelopment/files/UnrealGame/Impact/Impact/Saved/SaveGames`,
+/// `*.sav`) applies; UE's external files dir is the android files dir itself, so the saves are in
+/// `<android files>/UnrealGame/Impact/Impact/Saved/SaveGames`. Its Windows rules (`WinAppDataLocal`,
+/// `gameinstall`) are other files in the cloud (the PC build's saves) and are left alone.
 public struct CloudSaveProfile: Sendable {
+    /// A local folder a root token can stand for.
+    public enum Base: String, Sendable, Hashable, CaseIterable {
+        case writeLayer, androidFiles
+    }
+
+    /// How one root token's rules map to disk.
+    public struct Root: Sendable, Equatable {
+        public var base: Base
+        /// Leading path of the rule (below the token) the base folder stands for; matched in any case.
+        public var cloudPrefix: String
+        /// What replaces it below the base folder ("" = the base folder itself).
+        public var localPrefix: String
+        public init(base: Base, cloudPrefix: String, localPrefix: String) {
+            self.base = base; self.cloudPrefix = cloudPrefix; self.localPrefix = localPrefix
+        }
+
+        /// The path below the base folder for a rule path, keeping the rule's case below the prefix
+        /// (nil = the path is not under `cloudPrefix`).
+        public func localPath(_ path: String) -> String? {
+            let p = path.split(separator: "/").map(String.init)
+            let c = cloudPrefix.split(separator: "/").map(String.init)
+            guard p.count >= c.count, zip(p, c).allSatisfy({ $0.lowercased() == $1.lowercased() }) else { return nil }
+            return (localPrefix.split(separator: "/").map(String.init) + p.dropFirst(c.count)).joined(separator: "/")
+        }
+    }
+
     public let appID: UInt32
-    /// The install-relative folder the write layer stands for ("game/" for Source 2).
-    public let installPrefix: String
+    /// The Klepton target (hub game id, userdata folder name).
+    public let target: String
+    /// Lowercased root token -> mapping. Tokens not here are ignored.
+    public let roots: [String: Root]
     /// Names that never go up (device settings; level state the port leaves behind on exit).
     public let neverUpload: [String]
 
-    public init(appID: UInt32, installPrefix: String, neverUpload: [String]) {
-        self.appID = appID; self.installPrefix = installPrefix; self.neverUpload = neverUpload
+    public init(appID: UInt32, target: String, roots: [String: Root], neverUpload: [String]) {
+        self.appID = appID; self.target = target; self.neverUpload = neverUpload
+        self.roots = Dictionary(roots.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { a, _ in a })
     }
 
     /// Glovebox's list for the same port: personal.cfg is this device's settings; the .hl1/.hl2/.hl3
     /// files hold the level the game was in, left behind because the port exits the app.
-    public static let alyx = CloudSaveProfile(appID: 546560, installPrefix: "game/",
-                                              neverUpload: ["personal.cfg", "*.hl1", "*.hl2", "*.hl3"])
+    public static let alyx = CloudSaveProfile(
+        appID: 546560, target: "alyx",
+        roots: ["gameinstall": Root(base: .writeLayer, cloudPrefix: "game/", localPrefix: "")],
+        neverUpload: ["personal.cfg", "*.hl1", "*.hl2", "*.hl3"])
 
-    public static func forApp(_ app: UInt32) -> CloudSaveProfile? { app == alyx.appID ? alyx : nil }
+    /// One file, `VRsuper.hot`; `*.hot` leaves the game's own `VRsuper.hot.bak` out.
+    public static let superhot = CloudSaveProfile(
+        appID: 617830, target: "superhot",
+        roots: ["winappdatalocallow": Root(base: .androidFiles, cloudPrefix: "SUPERHOT_Team/SUPERHOT_VR",
+                                           localPrefix: "files")],
+        neverUpload: [])
+
+    /// `Global.sav`, `S0PlayerSettings.sav` and the slot saves, in UE's SaveGames folder.
+    public static let metro = CloudSaveProfile(
+        appID: 2669410, target: "metro",
+        roots: ["androidexternaldata": Root(base: .androidFiles,
+                                            cloudPrefix: "Android/data/com.vertigogames.ImpactDevelopment/files/",
+                                            localPrefix: "")],
+        neverUpload: [])
+
+    public static let all: [CloudSaveProfile] = [alyx, superhot, metro]
+
+    public static func forApp(_ app: UInt32) -> CloudSaveProfile? { all.first { $0.appID == app } }
+
+    /// The bases this profile's roots use.
+    public var bases: [Base] { Base.allCases.filter { b in roots.values.contains { $0.base == b } } }
 
     /// `<base>/Library/Application Support/Klepton/userdata/<target>/gameroot` (base = home / app container).
     public static func defaultWriteLayer(target: String, home: URL) -> URL {
@@ -639,16 +728,38 @@ public struct CloudSaveProfile: Sendable {
         return home.appendingPathComponent("Library/Application Support/Klepton/userdata/\(target)/gameroot")
     }
 
-    public func makeSync(remote: CloudRemote, rules: [CloudSaveRule], writeLayer: URL, stateDir: URL,
+    /// The Mac's android files dir for a target: `KL_FILES_DIR`, else
+    /// `<home>/Library/Application Support/Klepton/userdata/<target>` (kl_userdata_dir).
+    public static func defaultMacAndroidFiles(target: String, home: URL) -> URL {
+        if let f = ProcessInfo.processInfo.environment["KL_FILES_DIR"], !f.isEmpty { return URL(fileURLWithPath: f) }
+        return home.appendingPathComponent("Library/Application Support/Klepton/userdata/\(target)")
+    }
+
+    /// Where a Mac run of the port keeps this game's files.
+    public func macBases(home: URL) -> [Base: URL] {
+        [.writeLayer: Self.defaultWriteLayer(target: target, home: home),
+         .androidFiles: Self.defaultMacAndroidFiles(target: target, home: home)]
+    }
+
+    /// Where the hub keeps this game's files on the headset: `home` = the app's data container,
+    /// `gameRoot` = `<container>/Documents/games/<target>` (the game's android files are
+    /// `<gameRoot>/android-files`).
+    public func hubBases(home: URL, gameRoot: URL) -> [Base: URL] {
+        [.writeLayer: Self.defaultWriteLayer(target: target, home: home),
+         .androidFiles: gameRoot.appendingPathComponent("android-files", isDirectory: true)]
+    }
+
+    /// A rule's folder, given the local base folders (nil = the rule does not apply here).
+    public func folder(root: String, path: String, bases: [Base: URL]) -> URL? {
+        guard let m = roots[root.lowercased()], let base = bases[m.base], let rel = m.localPath(path) else { return nil }
+        return rel.isEmpty ? base : base.appendingPathComponent(rel, isDirectory: true)
+    }
+
+    public func makeSync(remote: CloudRemote, rules: [CloudSaveRule], bases: [Base: URL], stateDir: URL,
                          mode: CloudSyncMode) -> CloudSync {
-        let prefix = installPrefix.lowercased()
+        let profile = self
         var s = CloudSync(remote: remote, rules: rules,
-                          rootFolder: { $0 == "gameinstall" ? writeLayer : nil },
-                          localPath: { p in
-                              let p = p.lowercased()
-                              if p.hasPrefix(prefix) { return String(p.dropFirst(prefix.count)) }
-                              return p + "/" == prefix ? "" : nil
-                          },
+                          ruleFolder: { root, path in profile.folder(root: root, path: path, bases: bases) },
                           stateURL: stateDir.appendingPathComponent("state.json"),
                           backupRoot: stateDir.appendingPathComponent("backups"))
         s.mode = mode

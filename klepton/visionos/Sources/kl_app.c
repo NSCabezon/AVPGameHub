@@ -101,6 +101,7 @@ static char g_files[1024];
 static char g_apk[1024];
 static char g_dylibs[1024];
 static char g_fwroot[1024];   // the bundle's Frameworks/ itself: ANGLE, MoltenVK
+static char g_dyprefix[256];  // "<target>__": this game's translations' file prefix
 static char g_log[1024];
 static char g_logdir[1024];   // kl_app_set_log_dir; empty = the container
 static char g_status[512] = "not configured";
@@ -122,10 +123,14 @@ static int have(const char *p) { struct stat st; return p && *p && stat(p, &st) 
 // says nothing. What matters is whether *this target's* translations were
 // embedded — a bundle carrying the other app's guest would pass a bare
 // directory test and then fail to find a single library.
+//
+// The name is mkguest.sh's: <target>__<lib>.framework/<target>__<lib>, with the
+// '+' -> 'x' map dylib_candidate applies (kl_image.c).
 static int have_translations(void) {
-    char p[1200];
-    snprintf(p, sizeof p, "%s/%s.framework/%s", g_dylibs,
-             g_target->entry_lib, g_target->entry_lib);
+    char stem[300], p[1600];
+    snprintf(stem, sizeof stem, "%s%s", g_dyprefix, g_target->entry_lib);
+    for (char *c = stem; *c; c++) if (*c == '+') *c = 'x';
+    snprintf(p, sizeof p, "%s/%s.framework/%s", g_dylibs, stem, stem);
     return have(p);
 }
 
@@ -170,18 +175,19 @@ int kl_app_configure(const char *resources, const char *container) {
     // what it embeds, and a loose Mach-O elsewhere in the bundle is only
     // sealed. kl_load_auto knows both layouts.
     //
-    // A HUB build (several games in one app, visionos/targets.py kind "hub")
-    // embeds each game's translations in its own Frameworks/<target>/, because
-    // two games may ship libraries of the same name (libunity, libUE4,
-    // libc++_shared) and one flat directory can hold only one of each. So the
-    // selected target's subfolder wins when it carries this target's entry
-    // library; a single-target build has no such folder and keeps the flat
-    // layout. ANGLE and MoltenVK are shared by every game and stay in
-    // Frameworks/ itself (g_fwroot).
+    // Every build — a HUB (several games in one app, visionos/targets.py kind
+    // "hub") and a single-target one alike — embeds each game's translations
+    // FLAT in Frameworks/, named <target>__<lib>.framework/<target>__<lib>
+    // (mkguest.sh). Flat because App Store validation rejects anything but a
+    // framework or a dylib directly in Frameworks/ (ITMS-90432: the per-game
+    // subfolders the hub used to have); prefixed because two games ship
+    // libraries of the same name (libunity, libil2cpp, libmain, libc++_shared).
+    // The runtime is told the prefix (KL_DYLIB_PREFIX) and puts it on the FILE
+    // name only — the guest still asks for libunity.so. ANGLE and MoltenVK are
+    // shared by every game and sit, unprefixed, in the same directory.
     snprintf(g_fwroot, sizeof g_fwroot, "%s/Frameworks", resources);
-    snprintf(g_dylibs, sizeof g_dylibs, "%s/Frameworks/%s", resources, g_target->name);
-    if (!have_translations())
-        snprintf(g_dylibs, sizeof g_dylibs, "%s", g_fwroot);
+    snprintf(g_dylibs, sizeof g_dylibs, "%s", g_fwroot);
+    snprintf(g_dyprefix, sizeof g_dyprefix, "%s__", g_target->name);
     snprintf(g_assets, sizeof g_assets, "%s/%s/assets", container, g_target->tree);
     snprintf(g_apk,    sizeof g_apk,    "%s/%s", container, g_target->apk);
     snprintf(g_files,  sizeof g_files,  "%s/android-files", container);
@@ -206,11 +212,16 @@ int kl_app_configure(const char *resources, const char *container) {
     // With translations embedded, g_libdir never has to exist: it is only the
     // string NativeLoader.load() is handed and the prefix the DT_NEEDED walk
     // builds paths from, and kl_load_auto turns "<libdir>/libunity.so" into
-    // "Frameworks/libunity.framework/libunity" before touching the disk. The ELF
-    // tree is therefore not in the bundle — 80 MB that would buy only an A/B
-    // against the mmap loader the translations replace.
-    if (!have_translations() && !have(g_libdir))
-        return missing("guest libraries (neither translations nor an ELF tree)", g_libdir);
+    // "Frameworks/<target>__libunity.framework/<target>__libunity" before
+    // touching the disk. The ELF tree is therefore not in the bundle — 80 MB
+    // that would buy only an A/B against the mmap loader the translations
+    // replace.
+    if (!have_translations() && !have(g_libdir)) {
+        char want[600];
+        snprintf(want, sizeof want, "neither Frameworks/%s%s.framework nor %s",
+                 g_dyprefix, g_target->entry_lib, g_libdir);
+        return missing("guest libraries", want);
+    }
     // Assets and the APK are required only for an engine that reads its data out
     // of the APK's assets/ tree (Unity, UE4, JKXR, …). The FOLDER-FED guests carry
     // no assets/ and no .apk: a plain NativeActivity port (vicecity), and the
@@ -323,7 +334,10 @@ int kl_app_configure(const char *resources, const char *container) {
     // text RWX from a file the bundle does not own, which is the shape AMFI
     // exists to refuse. A translation that is present and fails is an error,
     // not a fallback (kl_load_auto).
-    if (have_translations()) setenv("KL_DYLIB_DIR", g_dylibs, 1);
+    if (have_translations()) {
+        setenv("KL_DYLIB_DIR", g_dylibs, 1);
+        setenv("KL_DYLIB_PREFIX", g_dyprefix, 1);
+    }
 
     // ANGLE rides in the same Frameworks/ directory, so the app can answer
     // "where is ANGLE" itself rather than have the launcher guess at a path

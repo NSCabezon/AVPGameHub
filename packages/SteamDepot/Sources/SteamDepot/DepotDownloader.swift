@@ -24,6 +24,15 @@ public struct DepotDownloadOptions: Sendable {
     /// Refuse to start when the volume cannot hold what remains (+ margin).
     public var checkFreeSpace: Bool
     public var freeSpaceMargin: UInt64
+    /// Raw CDN chunk files (encrypted + compressed, exactly as the CDN serves them) fetched by
+    /// someone else — the hub's system background downloads — named by chunk id (hex). Each is
+    /// decrypted, decompressed and checked like a network chunk, then deleted; one that fails
+    /// is deleted and fetched from the network instead. nil = network only.
+    public var stagingDirectory: URL?
+    /// Called once, after the verify/adopt phase, with the chunks this run is about to fetch (in
+    /// the order the workers take them) and the CDN servers it uses. Not called when nothing is
+    /// missing.
+    public var onChunkPlan: (@Sendable (ChunkPlan) -> Void)?
 
     public init(appID: UInt32, depotID: UInt32, branch: String = "public", directory: URL,
                 filters: [String] = [], include: (@Sendable (String) -> Bool)? = nil,
@@ -46,6 +55,33 @@ public struct DepotDownloadOptions: Sendable {
     }
 }
 
+/// What a run is about to fetch: enough for another HTTP client to fetch the same raw chunks
+/// (`<server>/depot/<depot>/chunk/<id>`). Holds no credential: the chunks are encrypted with the
+/// depot key, which never leaves the downloader. `needsCDNToken` = a server asked for a CDN auth
+/// token while this run planned (such chunks cannot be fetched without one).
+public struct ChunkPlan: Sendable {
+    public struct Chunk: Sendable, Equatable {
+        public let id: String
+        public let compressedLength: UInt32
+        public let uncompressedLength: UInt32
+    }
+    public let appID: UInt32
+    public let depotID: UInt32
+    public let manifestID: UInt64
+    /// HTTPS base URLs ("https://host"), best first. Plain-HTTP servers are left out.
+    public let servers: [String]
+    public let chunks: [Chunk]
+    /// How many chunks the run fetches at once: it is about `workers` chunks past `chunksDone`.
+    public let workers: Int
+    public let needsCDNToken: Bool
+    /// Uncompressed bytes of the whole (filtered) depot, and what of it was already on disk when
+    /// this run planned (depotBytes minus what `chunks` writes).
+    public var depotBytes: UInt64 = 0
+    public var presentBytes: UInt64 = 0
+
+    public static func chunkPath(depot: UInt32, id: String) -> String { "depot/\(depot)/chunk/\(id)" }
+}
+
 public struct DownloadProgress: Sendable {
     public enum Phase: String, Sendable { case preparing, verifying, downloading, finished }
     public var phase: Phase = .preparing
@@ -66,6 +102,8 @@ public struct DownloadProgress: Sendable {
     public var bytesDownloaded: UInt64 = 0
     /// Bytes received over the network (compressed+encrypted).
     public var networkBytes: UInt64 = 0
+    /// Chunks taken from `stagingDirectory` instead of the network.
+    public var chunksFromStaging = 0
     public var chunksTotal = 0
     public var chunksDone = 0
     /// Seconds since the download phase started.
@@ -103,6 +141,9 @@ public struct LocalContentStatus: Sendable {
     public let totalFiles: Int
     public let presentFiles: Int          // present with the exact expected size
     public let totalBytes: UInt64
+    /// Bytes actually written. A download pre-sizes every file it plans (sparse until its chunks
+    /// land), so a file at the expected size is not yet a downloaded file: until the depot is
+    /// complete this counts the blocks a file holds (capped at its size), not its length.
     public let presentBytes: UInt64
     /// Marker present and every listed file present at the right size.
     public var isComplete: Bool { markerManifestID != nil && hasFileList && presentFiles == totalFiles }
@@ -169,10 +210,12 @@ public final class SteamDepotDownloader: @unchecked Sendable {
             totalBytes += size
             var st = stat()
             let path = directory.appendingPathComponent(String(parts[2])).path
-            if stat(path, &st) == 0, UInt64(st.st_size) == size {
-                present += 1
-                presentBytes += size
-            }
+            guard stat(path, &st) == 0 else { continue }
+            if UInt64(st.st_size) == size { present += 1 }
+            // Complete depot (marker): every file counts whole (a copy may keep holes for zero runs).
+            // Otherwise what the file holds: a planned file is sparse until its chunks are written.
+            presentBytes += marker != nil && UInt64(st.st_size) == size
+                ? size : min(size, UInt64(st.st_size), UInt64(max(0, st.st_blocks)) * 512)
         }
         return LocalContentStatus(markerManifestID: marker, hasFileList: true, totalFiles: total, presentFiles: present,
                                   totalBytes: totalBytes, presentBytes: presentBytes)
@@ -305,15 +348,28 @@ public final class SteamDepotDownloader: @unchecked Sendable {
             if free < needed { throw SteamDepotError.insufficientSpace(needed: needed, available: free) }
         }
 
+        if let onPlan = opt.onChunkPlan, !order.isEmpty {
+            let https = servers.filter { $0.baseURL.hasPrefix("https://") }.map(\.baseURL)
+            onPlan(ChunkPlan(appID: opt.appID, depotID: opt.depotID, manifestID: gid, servers: https,
+                             chunks: order.map { id in
+                                 let c = jobs[id]!.chunk
+                                 return .init(id: id, compressedLength: c.compressedLength, uncompressedLength: c.uncompressedLength)
+                             },
+                             workers: max(1, opt.maxConcurrentDownloads), needsCDNToken: cdn.usedAuthToken,
+                             depotBytes: prog.depotBytes,
+                             presentBytes: prog.depotBytes - min(prog.depotBytes, prog.bytesToDownload)))
+        }
+
         // 9. Download with bounded concurrency.
         prog.phase = .downloading
         prog.message = order.isEmpty ? "All files verified" : "Downloading…"
         progress(prog)
         let start = Date()
         let tracker = Tracker(progress: prog, remainingPerFile: remainingPerFile, start: start, callback: progress)
-        let queue = JobQueue(order)
+        let queue = JobQueue(order, staging: opt.stagingDirectory)
         let root = opt.directory
         let verify = opt.verifyFiles
+        let staging = opt.stagingDirectory
         let workers = max(1, opt.maxConcurrentDownloads)
         try await withThrowingTaskGroup(of: Void.self) { group in
             for w in 0..<workers {
@@ -321,12 +377,12 @@ public final class SteamDepotDownloader: @unchecked Sendable {
                     while let id = await queue.next() {
                         try Task.checkCancellation()
                         let job = jobs[id]!
-                        let (data, net, format) = try await cdn.fetchChunk(job.chunk, key: key, worker: w)
+                        let (data, net, format) = try await cdn.fetchChunk(job.chunk, key: key, worker: w, staging: staging)
                         for t in job.targets {
                             try Self.write(data, to: root.appendingPathComponent(regular[t.file].name), offset: t.offset)
                         }
                         let finished = tracker.chunkDone(bytes: UInt64(data.count), network: UInt64(net), format: format,
-                                                         files: job.targets.map(\.file))
+                                                         files: job.targets.map(\.file), staged: net == 0)
                         for fi in finished {
                             let f = regular[fi]
                             let url = root.appendingPathComponent(f.name)
@@ -486,6 +542,13 @@ public final class SteamDepotDownloader: @unchecked Sendable {
             try Task.checkCancellation()
             let len = Int(c.uncompressedLength)
             guard c.offset + UInt64(len) <= existing else { missing.append(c); continue }
+            // A planned file is pre-sized and stays sparse until its chunks land: a chunk that
+            // lies entirely in a hole was never written, no need to read and hash it (a resumed
+            // 70 GB download would otherwise hash ~70 GB of zeros before fetching anything).
+            if len > 0 {
+                let data = lseek(fd, off_t(c.offset), SEEK_DATA)
+                if data < 0 ? errno == ENXIO : UInt64(data) >= c.offset + UInt64(len) { missing.append(c); continue }
+            }
             if buf.count < len { buf = [UInt8](repeating: 0, count: len) }
             let n = buf.withUnsafeMutableBytes { pread(fd, $0.baseAddress, len, off_t(c.offset)) }
             hashed += UInt64(max(0, n))
@@ -531,15 +594,48 @@ public final class SteamDepotDownloader: @unchecked Sendable {
     static func setExecutable(_ url: URL) { chmod(url.path, 0o755) }
 }
 
-/// Work queue of chunk ids.
+/// Work queue of chunk ids. With a staging directory, chunks someone else already fetched (the
+/// hub's background session, which works from the END of the plan) go first, whatever their place
+/// in the plan: they cost no network, assembling them frees the staging space that other client
+/// needs to go on, and the bytes show up in the game's files right away instead of only when the
+/// in-order run reaches the tail. The directory is listed again every `rescan` seconds, so chunks
+/// staged while this run is going are taken as they land.
 actor JobQueue {
-    private var items: [String]
+    private let items: [String]
     private var idx = 0
-    init(_ items: [String]) { self.items = items }
+    private let staging: URL?
+    private let rescan: TimeInterval
+    private let wanted: Set<String>
+    private var taken = Set<String>()
+    private var staged: [String] = []
+    private var lastScan = Date.distantPast
+
+    init(_ items: [String], staging: URL? = nil, rescan: TimeInterval = 2) {
+        self.items = items
+        self.staging = staging
+        self.rescan = rescan
+        self.wanted = staging == nil ? [] : Set(items)
+    }
+
     func next() -> String? {
-        guard idx < items.count else { return nil }
-        defer { idx += 1 }
-        return items[idx]
+        if staging != nil {
+            if Date().timeIntervalSince(lastScan) >= rescan { scan() }
+            while let id = staged.popLast() {
+                if taken.insert(id).inserted { return id }
+            }
+        }
+        while idx < items.count {
+            let id = items[idx]
+            idx += 1
+            if staging == nil || taken.insert(id).inserted { return id }
+        }
+        return nil
+    }
+
+    private func scan() {
+        lastScan = Date()
+        guard let staging, let names = try? FileManager.default.contentsOfDirectory(atPath: staging.path) else { return }
+        staged = names.filter { wanted.contains($0) && !taken.contains($0) }
     }
 }
 
@@ -600,9 +696,10 @@ final class Tracker: @unchecked Sendable {
     }
 
     /// Returns indices of files that just became complete.
-    func chunkDone(bytes: UInt64, network: UInt64, format: DepotChunk.Format, files: [Int]) -> [Int] {
+    func chunkDone(bytes: UInt64, network: UInt64, format: DepotChunk.Format, files: [Int], staged: Bool = false) -> [Int] {
         lock.lock()
         p.chunksDone += 1
+        if staged { p.chunksFromStaging += 1 }
         p.bytesDownloaded += bytes
         p.networkBytes += network
         formats[format.rawValue, default: 0] += 1

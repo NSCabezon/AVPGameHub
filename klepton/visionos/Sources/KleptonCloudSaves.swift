@@ -16,9 +16,22 @@
 // sync baseline and the cloud still holds the version it came from, and conflicts keep both copies
 // and upload nothing until resolved here.
 //
-// Where the saves are: Half-Life: Alyx writes them through kl_glibc's write layer,
-// <home>/Library/Application Support/Klepton/userdata/alyx/gameroot/hlvr/save (on the headset,
-// <home> is the app's data container), which is the Auto-Cloud rule gameinstall:game/hlvr/save.
+// Only for a game played from Steam: its Steam Cloud is Steam's, and Play boots the store whose data
+// is on the headset (KLCatalog.activeStore: Steam's when complete — owned in both stores, Steam;
+// owned in one, that one). A game played from its Meta copy (SUPERHOT VR can be owned on Meta only)
+// shows no Steam Cloud section and never syncs.
+//
+// Where the saves are (SteamDepot CloudSaveProfile; <home> = the app's data container, game root =
+// <container>/Documents/games/<target>, Paths.containerURL):
+// - Half-Life: Alyx: kl_glibc's write layer,
+//   <home>/Library/Application Support/Klepton/userdata/alyx/gameroot/hlvr/save — the Auto-Cloud rule
+//   gameinstall:game/hlvr/save.
+// - SUPERHOT VR: <game root>/android-files/files/VRsuper.hot (Unity's persistentDataPath) — the rule
+//   WinAppDataLocalLow:SUPERHOT_Team/SUPERHOT_VR, *.hot, which Steam maps to the Android files dir
+//   and keeps under the Windows name, so the PC's save is the same file.
+// - Metro Awakening: <game root>/android-files/UnrealGame/Impact/Impact/Saved/SaveGames/*.sav — the
+//   rule AndroidExternalData:Android/data/com.vertigogames.ImpactDevelopment/files/…; its Windows
+//   rules (the PC build's saves, other cloud files) are left alone.
 #if KL_HUB && canImport(SteamDepot)
 import SwiftUI
 import Foundation
@@ -48,9 +61,13 @@ enum KLCloudSaves {
         SteamGames.descriptor(for: target).flatMap { CloudSaveProfile.forApp($0.appID) }
     }
 
-    /// The guest's write layer (where the game writes its saves).
-    static func writeLayer(_ target: String) -> URL {
-        CloudSaveProfile.defaultWriteLayer(target: target, home: URL(fileURLWithPath: NSHomeDirectory()))
+    /// Whether the game is played from Steam (the store whose data Play boots; see the header).
+    /// Stats the game's Steam files: call it once per sync / sheet, not per redraw.
+    static func playsFromSteam(_ target: String) -> Bool { KLCatalog.activeStore(target) == .steam }
+
+    /// The local folders the game's saves are under (the guest's write layer, its android files).
+    static func bases(_ profile: CloudSaveProfile) -> [CloudSaveProfile.Base: URL] {
+        profile.hubBases(home: URL(fileURLWithPath: NSHomeDirectory()), gameRoot: Paths.containerURL(for: profile.target))
     }
 
     /// Sync state + backups, outside the game's data (deleting the game's data keeps them).
@@ -94,12 +111,16 @@ final class KLCloudSaveModel: ObservableObject {
         let settings = KLCloudSaves.settings(target)
         guard settings.enabled, tasks[target] == nil, let profile = KLCloudSaves.profile(target),
               let app = SteamGames.descriptor(for: target)?.appID else { return }
+        guard KLCloudSaves.playsFromSteam(target) else {
+            NSLog("%@", "[cloud] \(target): not played from Steam; Steam Cloud sync skipped (\(why))")
+            return
+        }
         running.insert(target)
-        let layer = KLCloudSaves.writeLayer(target), dir = KLCloudSaves.stateDir(target)
+        let bases = KLCloudSaves.bases(profile), dir = KLCloudSaves.stateDir(target)
         tasks[target] = Task {
             // Not detached: cancelling this task (Play's deadline) must reach the sync. runSync is
             // nonisolated, so it runs off the main actor anyway.
-            let result = await Self.runSync(app: app, profile: profile, layer: layer, stateDir: dir, mode: settings.mode, why: why)
+            let result = await Self.runSync(app: app, profile: profile, bases: bases, stateDir: dir, mode: settings.mode, why: why)
             lastResult[target] = result
             running.remove(target)
             tasks[target] = nil
@@ -136,7 +157,7 @@ final class KLCloudSaveModel: ObservableObject {
         reloadState(target)
     }
 
-    nonisolated private static func runSync(app: UInt32, profile: CloudSaveProfile, layer: URL, stateDir: URL,
+    nonisolated private static func runSync(app: UInt32, profile: CloudSaveProfile, bases: [CloudSaveProfile.Base: URL], stateDir: URL,
                                             mode: CloudSyncMode, why: String) async -> String {
         let store = KeychainCredentialStore(service: "SteamDepot.refreshToken", account: "steam")
         guard let creds = try? store.load() else { return klL("Not synced: sign in to Steam first.", "Sin sincronizar: inicia sesión en Steam.") }
@@ -150,7 +171,7 @@ final class KLCloudSaveModel: ObservableObject {
                 return klL("This game has no Steam Cloud saves.", "Este juego no tiene partidas en Steam Cloud.")
             }
             let remote = SteamCloud(session: session, appID: app, buildID: build, machineName: "AVP Game Hub (Apple Vision Pro)")
-            var sync = profile.makeSync(remote: remote, rules: rules, writeLayer: layer, stateDir: stateDir, mode: mode)
+            var sync = profile.makeSync(remote: remote, rules: rules, bases: bases, stateDir: stateDir, mode: mode)
             sync.log = { NSLog("[cloud] %@", $0) }
             let (report, _) = try await sync.run()
             await session.disconnect()
@@ -170,9 +191,16 @@ struct KLCloudSaveSection: View {
     let target: String
     @ObservedObject private var model = KLCloudSaveModel.shared
     @State private var s = KLCloudSaveSettings()
+    /// Played from Steam (checked once when the sheet opens: it stats the game's files).
+    @State private var fromSteam: Bool
+
+    init(target: String) {
+        self.target = target
+        _fromSteam = State(initialValue: KLCloudSaves.playsFromSteam(target))
+    }
 
     var body: some View {
-        if KLCloudSaves.profile(target) != nil {
+        if KLCloudSaves.profile(target) != nil, fromSteam {
             Section {
                 Toggle(klL("Sync saves with Steam Cloud (experimental)", "Sincronizar partidas con Steam Cloud (experimental)"),
                        isOn: Binding(get: { s.enabled }, set: { s.enabled = $0; if $0 { s.mode = .downloadOnly }; save() }))
@@ -237,7 +265,8 @@ func klCloudSaveCardLine(_ target: String) -> (String, Color)? {
     let m = KLCloudSaveModel.shared
     guard KLCloudSaves.settings(target).enabled else { return nil }
     if m.running.contains(target) { return (klL("Syncing saves with Steam Cloud…", "Sincronizando partidas con Steam Cloud…"), .blue) }
-    if let n = m.conflicts[target]?.count, n > 0 {
+    // Open conflicts only matter while the game is played from Steam (rare path: the store check stats files).
+    if let n = m.conflicts[target]?.count, n > 0, KLCloudSaves.playsFromSteam(target) {
         return (klL("Steam Cloud: \(n) save conflict\(n == 1 ? "" : "s") — see Settings",
                     "Steam Cloud: \(n) conflicto\(n == 1 ? "" : "s") de partida — ver Ajustes"), .orange)
     }

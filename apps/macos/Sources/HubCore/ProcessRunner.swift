@@ -149,6 +149,37 @@ public final class ProcessRunner: @unchecked Sendable {
         }
     }
 
+    /// SIGTERM to this runner's own process only (not its children, never by name), then SIGKILL
+    /// if it is still the same running process after `timeout`. For servers that clean up on
+    /// SIGTERM (the stream host sends the headset a BYE).
+    public func terminate(timeout: TimeInterval = 5) {
+        lock.lock()
+        let p = process
+        lock.unlock()
+        guard let p, p.isRunning else { return }
+        kill(p.processIdentifier, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+            // `p.isRunning` is the Process object's own state: true only while this exact child
+            // has not been reaped, so the pid cannot have been reused by another process.
+            if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+        }
+    }
+
+    /// `terminate`, blocking until the process is gone (app quit). SIGKILL after `timeout`.
+    public func terminateAndWait(timeout: TimeInterval = 3) {
+        lock.lock()
+        let p = process
+        lock.unlock()
+        guard let p, p.isRunning else { return }
+        kill(p.processIdentifier, SIGTERM)
+        let end = Date().addingTimeInterval(timeout)
+        while p.isRunning, Date() < end { usleep(20_000) }
+        if p.isRunning {
+            kill(p.processIdentifier, SIGKILL)
+            p.waitUntilExit()
+        }
+    }
+
     /// Run to completion and return status + all output. For short probes (status checks).
     public static func capture(_ command: ShellCommand, timeout: TimeInterval = 60) async -> (status: Int32, output: String) {
         await withCheckedContinuation { cont in

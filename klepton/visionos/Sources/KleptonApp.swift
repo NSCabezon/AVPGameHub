@@ -128,7 +128,13 @@ enum Immersive {
 enum Lifecycle {
     /// Set while the Steam content gate (KleptonSteamContent.swift) is on screen: no guest
     /// has booted, so there is nothing to tear down, and exiting would kill a download.
+    /// The hub starts with it set: a launch the system makes in the background to deliver
+    /// download events has no game, and nothing to tear down. HubLaunch.select clears it.
+    #if KL_HUB
+    static var keepAlive = true
+    #else
     static var keepAlive = false
+    #endif
 
     static func scenePhaseChanged(to phase: ScenePhase) {
         NSLog("[app] scene phase -> \(phase)")
@@ -178,6 +184,10 @@ enum Lifecycle {
 @main
 struct KleptonApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    #if KL_HUB
+    /// The background download session's launch events (KleptonBackgroundDownloads.swift).
+    @UIApplicationDelegateAdaptor(KLHubAppDelegate.self) private var hubDelegate
+    #endif
     /// Observed so the Matting panel's hand-matting toggle re-evaluates the
     /// immersive scene's `.upperLimbVisibility` live. The object is the shared
     /// singleton the panel edits, not a second copy.

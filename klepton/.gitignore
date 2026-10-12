@@ -121,3 +121,6 @@ visionos/Assets.xcassets/AppIcon-*.solidimagestack/
 visionos/Assets.xcassets/StartHero-*.imageset/
 /batman
 /batman/
+
+# Stock (unpatched) MoltenVK build kept for A/B tests
+/vendor-moltenvk-stock/

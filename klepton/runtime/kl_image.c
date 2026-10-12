@@ -831,6 +831,13 @@ kl_image *kl_load_dylib(const char *path) {
 // A missing translation is normal and quiet. A translation that is *present and
 // fails* is not: it returns NULL and says so, because falling back to the ELF
 // there would hide exactly the regression this path exists to catch.
+// The prefix every translated library's file name carries (KL_DYLIB_PREFIX, e.g.
+// "beatsaber__"), or "" — the host's `make dylibs` layout has none. See
+// dylib_candidate.
+const char *kl_dylib_prefix(void) {
+    return kl_env_str("KL_DYLIB_PREFIX", "");
+}
+
 // The translation of `path`, if KL_DYLIB_DIR names one. Factored out because two
 // callers must agree about it: kl_load_auto, which loads it, and kl_can_load,
 // which answers "does this library exist" for the guest. They disagreed once and
@@ -851,8 +858,20 @@ static int dylib_candidate(const char *path, char *out, size_t cap, char *name_o
     // a CFBundleExecutable that does (libc++_shared, error 90121) — so mkguest maps it
     // to a filesystem-safe name. Apply the SAME map here to build the path, while the
     // guest keeps calling the library by its real DT_NEEDED name (name_out, above).
+    //
+    // ...and behind the per-game PREFIX (KL_DYLIB_PREFIX, kl_dylib_prefix). App
+    // Store validation allows nothing but frameworks and dylibs directly in an
+    // app's Frameworks/ — no subfolders (ITMS-90432) — so a hub carrying several
+    // games cannot keep each game's libraries in a folder of its own, and the
+    // games share names (libunity, libil2cpp, libmain, libc++_shared). mkguest.sh
+    // therefore names every translation <game>__<lib>.framework/<game>__<lib>, flat
+    // in Frameworks/, and the app tells the runtime which game it is. Only the FILE
+    // name carries it: the guest still asks for libunity.so, and name_out above is
+    // still "libunity". With a prefix set there is deliberately no unprefixed
+    // fallback — that would answer a guest's DT_NEEDED with another game's
+    // library, or with ANGLE's own libGLESv2.framework sitting beside them.
     char fsname[256];
-    snprintf(fsname, sizeof fsname, "%s", name);
+    snprintf(fsname, sizeof fsname, "%s%s", kl_dylib_prefix(), name);
     for (char *p = fsname; *p; p++) if (*p == '+') *p = 'x';
 
     // Two layouts, because the host and the bundle disagree about what a

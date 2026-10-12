@@ -11,6 +11,9 @@ final class CDNClient: @unchecked Sendable {
     private let lock = NSLock()
     private var tokens: [String: String] = [:]   // host -> token query string
     private var penalty: [Int] = []
+    private var tokenUsed = false
+    /// A server asked for (and got) a CDN auth token during this client's life.
+    var usedAuthToken: Bool { lock.lock(); defer { lock.unlock() }; return tokenUsed }
 
     init(servers: [CDNServer], depot: UInt32, app: UInt32, session: SteamSession, maxConnections: Int,
          log: @escaping @Sendable (String) -> Void) {
@@ -40,7 +43,7 @@ final class CDNClient: @unchecked Sendable {
 
     private func penalise(_ i: Int) { lock.lock(); penalty[i] += 1; lock.unlock() }
 
-    private func setToken(_ t: String, for host: String) { lock.lock(); tokens[host] = t; lock.unlock() }
+    private func setToken(_ t: String, for host: String) { lock.lock(); tokens[host] = t; tokenUsed = true; lock.unlock() }
     private func token(for host: String) -> String? { lock.lock(); defer { lock.unlock() }; return tokens[host] }
 
     func get(_ path: String, worker: Int) async throws -> Data {
@@ -78,7 +81,21 @@ final class CDNClient: @unchecked Sendable {
     }
 
     /// Download + decrypt + decompress + verify one chunk. Returns (data, network bytes, format).
-    func fetchChunk(_ chunk: DepotManifest.Chunk, key: Data, worker: Int) async throws -> (Data, Int, DepotChunk.Format) {
+    /// A raw chunk staged by someone else (`staging/<id>`) is used first — network bytes 0 — and
+    /// deleted either way; one that does not decrypt/verify is fetched from the network.
+    func fetchChunk(_ chunk: DepotManifest.Chunk, key: Data, worker: Int, staging: URL? = nil) async throws -> (Data, Int, DepotChunk.Format) {
+        if let staging {
+            let file = staging.appendingPathComponent(chunk.id)
+            if let raw = try? Data(contentsOf: file) {
+                try? FileManager.default.removeItem(at: file)
+                do {
+                    let (data, fmt) = try DepotChunk.process(raw, chunk: chunk, key: key)
+                    return (data, 0, fmt)
+                } catch {
+                    log("staged chunk \(chunk.id) did not verify (\(error)); fetching it")
+                }
+            }
+        }
         var lastError: Error = SteamDepotError.cdn("no attempt")
         for _ in 0..<3 {
             let raw = try await get("depot/\(depot)/chunk/\(chunk.id)", worker: worker)

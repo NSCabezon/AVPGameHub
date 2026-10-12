@@ -102,11 +102,22 @@ void kl_stream_client_note_displayed(kl_stream_client *c, double presentation_ti
 
 enum {
     KL_STREAM_CLIENT_CONNECTING = 0,  // no HELLO_ACK yet
-    KL_STREAM_CLIENT_WAITING    = 1,  // acked, no picture decoded yet
-    KL_STREAM_CLIENT_STREAMING  = 2,  // pictures arriving
-    KL_STREAM_CLIENT_NO_SIGNAL  = 3,  // acked, > 1 s since the last decoded frame
+    KL_STREAM_CLIENT_WAITING    = 1,  // acked, host alive, no picture yet (it is
+                                      // booting the game: host_state BOOTING)
+    KL_STREAM_CLIENT_STREAMING  = 2,  // pictures have come and the host is alive
+                                      // (since_video_s: how fresh the last one is)
+    KL_STREAM_CLIENT_NO_SIGNAL  = 3,  // acked, NOTHING from the host for
+                                      // KL_STREAM_NOSIGNAL_S (3 s): no video, audio,
+                                      // PING or STATUS
     KL_STREAM_CLIENT_REFUSED    = 4,  // HELLO_ACK.status != OK
-    KL_STREAM_CLIENT_ENDED      = 5,  // host sent BYE
+    KL_STREAM_CLIENT_ENDED      = 5,  // over: see end_reason
+};
+
+// Why a session is ENDED.
+enum {
+    KL_STREAM_END_BYE  = 1,   // the host said BYE: the game on the Mac ended
+    KL_STREAM_END_LOST = 2,   // nothing from the host for KL_STREAM_LOST_S (5 s)
+                              // after video (KL_STREAM_LOST_BOOT_S, 30 s, before)
 };
 
 typedef struct {
@@ -116,6 +127,14 @@ typedef struct {
     uint32_t frame_w, frame_h, bitrate_kbps;
     float    host_fps_target;
     double   since_video_s;     // since the last decoded frame; -1 = never
+    double   since_rx_s;        // since the last packet of any kind (or the ACK); -1 = not acked
+    int      end_reason;        // KL_STREAM_END_*, 0 while not ENDED
+    // The host's last STATUS keepalive: enum kl_stream_host_state (0 = none
+    // seen: an older host), seconds in that state (advanced to now), and the
+    // frames the guest has completed.
+    uint32_t host_state;
+    float    host_seconds;
+    uint32_t host_guest_frames;
     // The last full second.
     float    video_fps, decode_ms, kbps, rtt_ms, p2p_ms;
     float    interval_ms, interval_sd_ms;   // between decoded frames: cadence

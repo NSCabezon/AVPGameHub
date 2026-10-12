@@ -3252,6 +3252,11 @@ g_xr_sources[] = {
     // squeeze/value drives the grip BUTTON), read as a float it is the pull.
     { "/input/trigger/click",    KLXR_SRC_INDEX_TRIGGER, { 0, 0 } },
     { "/input/squeeze/value",    KLXR_SRC_HAND_TRIGGER,  { 0, 0 } },
+    // Metro Awakening (UE 5.2) binds its grip press, oculustouch_*_grip_click,
+    // to the BARE /input/squeeze on the Touch profile. A parent path binds to
+    // its value child (OpenXR 1.0 §6.3.2), the same rule as the bare trigger
+    // above; read as a boolean it is a press, as a float the squeeze.
+    { "/input/squeeze",          KLXR_SRC_HAND_TRIGGER,  { 0, 0 } },
     { "/input/thumbstick/x",     KLXR_SRC_STICK_X, { 0, 0 } },
     { "/input/thumbstick/y",     KLXR_SRC_STICK_Y, { 0, 0 } },
     // valve only: the whole-stick path, which is what a Vector2f action binds
@@ -6144,6 +6149,18 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
             // guest in the corpus submits more than one projection layer on
             // those routes, and the one that tried is named rather than drawn
             // wrong.
+            // The size the guest rendered this eye at, for the Mac stream host's
+            // encode size (kl_ovrp_note_submit_size; kl_openvr files Alyx's from
+            // its Submit bounds). Without it an OpenXR guest was encoded at the
+            // HELLO's eye size, past the encoder's KL_STREAM_MAX_MPIX budget:
+            // Metro at the panel's 3072x2465 went out as 6144x2464 at 36 ms an
+            // encode, ~25 fps. The base (captured) layer's rect is the eye.
+            if ((int)li == cap_layer) {
+                const XrRect2Di *sr = &proj->views[v].subImage.imageRect;
+                int sw = sr->extent.width > 0 ? sr->extent.width : (int)sc->width;
+                int sh = sr->extent.height > 0 ? sr->extent.height : (int)sc->height;
+                if (sw > 0 && sh > 0) kl_ovrp_note_submit_size((int)v, sw, sh);
+            }
             int slot = -1;
             if (captured) {
                 if (sc->session && sc->session->gfx == KLXR_GFX_VULKAN) {
@@ -7420,6 +7437,9 @@ int kl_openxr_input_selftest(FILE *f) {
     void *haptic  = klxr_st_action(set, "pamir_stream_haptic",
                                    KLXR_ACTION_TYPE_VIBRATION);
     void *aim     = klxr_st_action(set, "ui_pointer_pose", KLXR_ACTION_TYPE_POSE);
+    // Metro Awakening's grip press: the BARE squeeze path on Touch.
+    void *gripc   = klxr_st_action(set, "oculustouch_right_grip_click",
+                                   KLXR_ACTION_TYPE_BOOLEAN);
 
     const XrActionSuggestedBinding touch_map[] = {
         klxr_st_sb(press0,  "/user/hand/left/input/x/click"),
@@ -7441,6 +7461,7 @@ int kl_openxr_input_selftest(FILE *f) {
         klxr_st_sb(haptic,  "/user/hand/right/output/haptic"),
         klxr_st_sb(aim,     "/user/hand/left/input/aim/pose"),
         klxr_st_sb(aim,     "/user/hand/right/input/aim/pose"),
+        klxr_st_sb(gripc,   "/user/hand/right/input/squeeze"),
     };
     const XrActionSuggestedBinding vive_map[] = {
         klxr_st_sb(press4,  "/user/hand/left/input/squeeze/click"),
@@ -7477,6 +7498,9 @@ int kl_openxr_input_selftest(FILE *f) {
     ok &= klxr_st_ok(f, "grip/pose and aim/pose decode to different things",
                      ((klxr_action *)pose)->kind[0] == KLXR_SRC_POSE &&
                      ((klxr_action *)aim)->kind[0] == KLXR_SRC_POSE_AIM);
+
+    ok &= klxr_st_ok(f, "a bare /input/squeeze binds the squeeze (its value child)",
+                     ((klxr_action *)gripc)->kind[1] == KLXR_SRC_HAND_TRIGGER);
 
     // Re-suggesting REPLACES, per the spec. Checked with a map that drops
     // press-0 and keeps analog-0: an accumulating runtime keeps both and a

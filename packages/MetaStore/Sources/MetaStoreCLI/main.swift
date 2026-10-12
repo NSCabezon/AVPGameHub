@@ -10,6 +10,9 @@
 //                                      a recipe's files to the Mac, verified + resumable — for building
 //                                      a port (translation) ONLY; the headset downloads game data itself
 //                                      (--locale en-US: also that voice-language pack, repeatable; off by default)
+//   metastore resolve <recipe>         whether Meta hands a recipe's APK out as a signed CDN address
+//                                      (what the hub's background downloads need); prints the status
+//                                      and the CDN host only, never the address itself
 //   metastore push-token [--device ID] [--bundle ID]
 //                                      copy the token into the hub's container (one-time import file)
 //
@@ -70,6 +73,8 @@ func usage() -> Never {
                                           download a recipe's files to the Mac for TRANSLATION only
                                           (beatsaber --apk-only defaults to $KLEPTON_DIR/beatsaber-<version>.apk)
                                           --locale CODE: also a voice-language pack (e.g. en-US), repeatable
+      resolve <recipe>                    one request: does Meta redirect the APK to a signed CDN address?
+                                          (prints status and host only)
       push-token [--device ID] [--bundle ID]
                                           copy the token to the hub on the headset (default $KLEPTON_DEVICE, $KLEPTON_BUNDLE_ID)
     """)
@@ -197,6 +202,25 @@ case "fetch":
         } else {
             print("Files under \(layout.root.path) (\(summary.downloaded) downloaded, \(summary.kept) already there)")
         }
+    }
+
+case "resolve":
+    // One gated request for the recipe's first required file, redirect not followed. Only the
+    // answer's shape is printed: the signed address is a credential for its lifetime.
+    guard args.count >= 2, let recipe = Recipes.recipe(id: args[1]), let file = recipe.files.first(where: \.required) else {
+        fail("resolve needs a recipe id: " + Recipes.all.map(\.id).joined(separator: ", "))
+    }
+    let t = token()
+    runAsync {
+        let a = try await RequestGate().run { try await MetaClient(token: t).downloadAnswer(id: file.id) }
+        let loc = a.location.flatMap { URL(string: $0, relativeTo: URL(string: "https://securecdn.oculus.com/")) }?.absoluteURL
+        let names = loc.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.map(\.name).sorted() } ?? []
+        print("\(recipe.id) \(file.name): HTTP \(a.status)"
+              + (loc.map { " -> \($0.scheme ?? "?")://\($0.host ?? "?") (query parameters: \(names.joined(separator: ", ")))" } ?? ", no Location"))
+        let r = try MetaClient.location(status: a.status, header: a.location,
+                                        requestURL: URL(string: "https://securecdn.oculus.com/binaries/download/")!)
+        if case .signed = r { print("signed CDN address: background downloads possible") }
+        else { print("no usable redirect: in-process download only") }
     }
 
 case "push-token":

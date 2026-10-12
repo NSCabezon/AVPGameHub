@@ -35,6 +35,19 @@
 #   ./build_run_vpro.sh --log           # pull + summarise the last run, build nothing
 #   ./build_run_vpro.sh --build-only    # generate + build + sign for the device, stop
 #                                       #   there (no headset needed)
+#   ./build_run_vpro.sh hub --archive   # an App Store Connect build for INTERNAL
+#                                       #   TestFlight: Release archive, App Store
+#                                       #   signed .ipa exported to disk, local
+#                                       #   pre-flight checks (visionos/tf_check.py).
+#                                       #   Needs KLEPTON_TEAM and a real
+#                                       #   KLEPTON_BUNDLE_ID. Installs nothing.
+#   ./build_run_vpro.sh hub --archive --upload
+#                                       #   ...and send it to App Store Connect
+#                                       #   (Xcode's signed-in account). --validate
+#                                       #   runs altool --validate-app first (needs
+#                                       #   ASC_KEY_ID / ASC_ISSUER_ID + the app record)
+#                                       #   Version: KLEPTON_APP_VERSION (0.1.0);
+#                                       #   build: KLEPTON_APP_BUILD (YYYYMMDD.HHMM)
 #   ./build_run_vpro.sh hub             # the HUB: one app ($KLEPTON_BUNDLE_ID)
 #                                       #   with every game in targets.py's hub list
 #                                       #   and an in-app library; KL_HUB_GAME=alyx
@@ -60,6 +73,7 @@ GLFB=""           # unset => the app's default (on)
 STAGE=""          # empty => KL_SKIP_STAGE=1 (assets persist across installs)
 LOG_ONLY=""
 BUILD_ONLY=""
+ARCHIVE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -72,7 +86,10 @@ while [ $# -gt 0 ]; do
     --sync)       export KL_SYNC_GUEST=1; shift ;;
     --log)        LOG_ONLY=1; shift ;;
     --build-only) BUILD_ONLY=1; shift ;;
-    -h|--help)    sed -n '2,40p' "$0"; exit 0 ;;
+    --archive)    ARCHIVE=1; shift ;;
+    --upload)     ARCHIVE=1; export KL_TF_UPLOAD=1; shift ;;
+    --validate)   ARCHIVE=1; export KL_TF_VALIDATE=1; shift ;;
+    -h|--help)    sed -n '2,56p' "$0"; exit 0 ;;
     -*)           echo "unknown flag: $1 (try --help)" >&2; exit 2 ;;
     # A bare word is the TARGET. One only: a second would silently be ignored,
     # and "which guest did that run actually build" is not a question worth
@@ -127,6 +144,35 @@ print(phys[0]["identifier"])
 ' "$json"
   rm -f "$json"
 }
+# --archive: the App Store Connect build (visionos/testflight.sh). No headset,
+# nothing installed: an App Store signed app cannot be installed by devicectl.
+if [ -n "$ARCHIVE" ]; then
+  # Checked here, before minutes of translation: the public tree's ids are
+  # placeholders (com.example.*) that no App Store Connect record can carry.
+  [ -n "${KLEPTON_TEAM:-}" ] || { echo "!! --archive needs KLEPTON_TEAM (your App Store Connect team id)"; exit 2; }
+  case "$BUNDLE_ID" in
+    ""|com.example.*|*.example.*)
+      echo "!! --archive needs KLEPTON_BUNDLE_ID: $BUNDLE_ID is a placeholder (the App ID of your App Store Connect app)"
+      exit 2 ;;
+  esac
+  export KLEPTON_BUNDLE_ID="$BUNDLE_ID"
+  # The marketing version is chosen; the build number only has to grow, so it
+  # is the time — two components, because each must fit in 9 digits.
+  export KLEPTON_APP_VERSION="${KLEPTON_APP_VERSION:-0.1.0}"
+  export KLEPTON_APP_BUILD="${KLEPTON_APP_BUILD:-$(date +%Y%m%d.%H%M)}"
+  # low-latency-streaming is granted, not ticked: an App ID without it fails the
+  # distribution signing outright. Off unless asked for (KLEPTON_LOW_LATENCY=1),
+  # whatever this checkout's development builds default to.
+  export KLEPTON_LOW_LATENCY="${KLEPTON_LOW_LATENCY:-0}"
+  # App Store Connect wants an icon; the per-target art is gitignored, so the hub
+  # gets a neutral one drawn when it has none (an existing stack is kept).
+  [ "$KLT_KIND" != hub ] || python3 visionos/mk_hub_icon.py
+  echo "target    : $KLT_NAME ($BUNDLE_ID, $KLT_PRODUCT.app) — App Store archive $KLEPTON_APP_VERSION ($KLEPTON_APP_BUILD)"
+  echo "            low-latency-streaming: $([ "$KLEPTON_LOW_LATENCY" = 0 ] && echo dropped || echo kept)" \
+       "· upload: $([ -n "${KL_TF_UPLOAD:-}" ] && echo YES || echo no, export only)"
+  exec visionos/run.sh archive
+fi
+
 # --build-only: generate + build + sign for the device, then stop. No headset.
 if [ -n "$BUILD_ONLY" ]; then
   echo "target    : $KLT_NAME ($BUNDLE_ID, $KLT_PRODUCT.app) — build only"

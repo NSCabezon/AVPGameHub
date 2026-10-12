@@ -18,9 +18,18 @@
 # arch mismatch naming neither.
 #
 # Which guest comes from KLEPTON_TARGET (visionos/targets.py). The output goes
-# into a per-target subdirectory of Frameworks/ so that building the second app
-# does not overwrite the first one's embedded guest in place — a bundle ID
-# separates the installed apps and nothing at all about their build outputs.
+# into a per-target subdirectory of visionos/Frameworks/ (the SOURCE side) so
+# that building the second app does not overwrite the first one's embedded guest
+# in place — a bundle ID separates the installed apps and nothing at all about
+# their build outputs.
+#
+# Inside the .app every game's frameworks land FLAT in Frameworks/ — App Store
+# validation accepts nothing else there (ITMS-90432) — so the framework itself
+# carries the game: <target>__<lib>.framework/<target>__<lib>. Same layout for a
+# single-target app, a hub, a Debug build and an archive; kl_app.c hands the
+# runtime the prefix (KL_DYLIB_PREFIX) and dylib_candidate (kl_image.c) puts it
+# back on the name the guest asks for. The .xcframework CONTAINER keeps the bare
+# library name: it never reaches the .app.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=".."
@@ -79,11 +88,11 @@ for NAME in $LIBS; do
   # for "libc++_shared.so" and the runtime loader applies the SAME map when it
   # resolves the path (dylib_candidate in kl_image.c). Only the .so SOURCE and the
   # .xcframework CONTAINER keep the original name.
-  FWNAME=$(printf '%s' "$NAME" | tr '+' 'x')
+  FWNAME=$(printf '%s__%s' "$KLT_NAME" "$NAME" | tr '+' 'x')
   for PLAT in $PLATS; do
     case "$PLAT" in
-      xros)        KLPLAT=visionos    ;;
-      xrsimulator) KLPLAT=visionossim ;;
+      xros)        KLPLAT=visionos;    BPLAT=XROS          ;;
+      xrsimulator) KLPLAT=visionossim; BPLAT=XRSimulator ;;
     esac
     FW="build/guest/$KLT_NAME/$PLAT/$FWNAME.framework"
     mkdir -p "$FW"
@@ -93,11 +102,14 @@ for NAME in $LIBS; do
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleExecutable</key><string>$FWNAME</string>
   <key>CFBundleIdentifier</key><string>dev.klepton.guest.$ID_NAME</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>$FWNAME</string>
   <key>CFBundlePackageType</key><string>FMWK</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleSupportedPlatforms</key><array><string>$BPLAT</string></array>
   <key>CFBundleVersion</key><string>1</string>
   <key>MinimumOSVersion</key><string>26.0</string>
 </dict></plist>
@@ -111,7 +123,7 @@ EOF
   xcodebuild -create-xcframework "${FWARGS[@]}" \
       -output "$OUT/$NAME.xcframework" > /dev/null
   printf '  %-22s %s bytes\n' "$NAME.xcframework" \
-      "$(stat -f%z "build/guest/$KLT_NAME/$FIRST_PLAT/$NAME.framework/$NAME")"
+      "$(stat -f%z "build/guest/$KLT_NAME/$FIRST_PLAT/$FWNAME.framework/$FWNAME")"
 done
 
 echo "[mkguest] $KLT_NAME done -> $OUT/"

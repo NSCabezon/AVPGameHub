@@ -61,6 +61,17 @@ void kl_fault_add_reporter(void (*fn)(FILE *)) {
     if (fn && g_extra_n < KL_FAULT_MAX_REPORTERS) g_extra[g_extra_n++] = fn;
 }
 
+static void (*g_exit_hooks[KL_FAULT_MAX_REPORTERS])(int);
+static unsigned g_exit_hooks_n;
+
+void kl_fault_add_exit_hook(void (*fn)(int)) {
+    if (fn && g_exit_hooks_n < KL_FAULT_MAX_REPORTERS) g_exit_hooks[g_exit_hooks_n++] = fn;
+}
+
+void kl_fault_run_exit_hooks(int status) {
+    for (unsigned i = 0; i < g_exit_hooks_n; i++) g_exit_hooks[i](status);
+}
+
 // Walk an AAPCS64 frame chain and name each return address, guest images
 // included. x29 is the frame pointer and {fp, lr} sit at [fp], which both the
 // guest and our own code honour.

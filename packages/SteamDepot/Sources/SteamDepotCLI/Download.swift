@@ -38,12 +38,24 @@ func runDownload(session: SteamSession, args: Args) async throws {
     guard !targets.isEmpty else { throw CLIError("no depots selected (use --depot or --os)") }
 
     for depot in targets {
-        let opts = DepotDownloadOptions(appID: args.app, depotID: depot, branch: args.branch,
+        var opts = DepotDownloadOptions(appID: args.app, depotID: depot, branch: args.branch,
                                         directory: URL(fileURLWithPath: (dir as NSString).expandingTildeInPath),
                                         filters: args.filters, maxConcurrentDownloads: args.maxDownloads,
                                         verifyFiles: args.verify, forceVerify: args.forceVerify,
                                         pinnedManifestID: SupportedTitles.byAppID[args.app]?
                                             .manifestSelection(depot: depot, branch: args.branch).pinnedGID)
+        if let st = args.staging { opts.stagingDirectory = URL(fileURLWithPath: (st as NSString).expandingTildeInPath, isDirectory: true) }
+        if let out = args.planOut {
+            // The background-download plan: one "<url>\t<chunk id>" line per chunk, then stop.
+            let path = (out as NSString).expandingTildeInPath
+            opts.onChunkPlan = { plan in
+                let server = plan.servers.first ?? ""
+                let lines = plan.chunks.map { "\(server)/\(ChunkPlan.chunkPath(depot: plan.depotID, id: $0.id))\t\($0.id)" }
+                try? (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+                say("plan: \(plan.chunks.count) chunks from \(plan.servers.count) https server(s), CDN token needed: \(plan.needsCDNToken) -> \(path)")
+                exit(0)
+            }
+        }
         say("downloading depot \(depot) → \(opts.directory.path) (\(args.maxDownloads) parallel)")
         let lastLine = LastLine()
         let summary = try await downloader.download(opts) { p in
@@ -54,6 +66,7 @@ func runDownload(session: SteamSession, args: Args) async throws {
                 return
             }
             guard p.phase == .downloading || p.phase == .finished else { return }
+            lastLine.noteStaged(p.chunksFromStaging)
             let pct = p.bytesToDownload > 0 ? Double(p.bytesDownloaded) / Double(p.bytesToDownload) * 100 : 100
             let rate = p.elapsed > 0 ? Double(p.networkBytes) / p.elapsed : 0
             let line = String(format: "%5.1f%%  %@ / %@  files %d/%d  chunks %d/%d  %@/s",
@@ -70,12 +83,16 @@ func runDownload(session: SteamSession, args: Args) async throws {
                 fmtBytes(UInt64(Double(summary.verifiedBytes) / max(0.001, summary.verifyElapsed)))))
         }
         say("chunk formats: \(summary.chunkFormats)")
+        if opts.stagingDirectory != nil { say("chunks taken from staging: \(lastLine.staged)") }
     }
 }
 
 final class LastLine: @unchecked Sendable {
     private let lock = NSLock()
     private var last = Date.distantPast
+    private var _staged = 0
+    var staged: Int { lock.lock(); defer { lock.unlock() }; return _staged }
+    func noteStaged(_ n: Int) { lock.lock(); _staged = max(_staged, n); lock.unlock() }
     func print(_ s: String) {
         lock.lock(); defer { lock.unlock() }
         let now = Date()

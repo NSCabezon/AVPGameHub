@@ -247,25 +247,86 @@ final class SteamContentModel: ObservableObject {
     private var forceVerify = false
     private let store = KeychainCredentialStore(service: "SteamDepot.refreshToken", account: "steam")
     var interruptedByBackground = false
+    #if KL_HUB
+    /// The depot the in-app run is on (the background lane it feeds), and its worker count.
+    private var currentDepot: UInt32?
+    private var observers: [NSObjectProtocol] = []
+    #endif
 
     init(game: SteamGameDescriptor) {
         self.game = game
         local = game.status()
         account = (try? store.load())?.accountName
         refreshLocal()
+        #if KL_HUB
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: KLBackgroundDownloads.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.objectWillChange.send() }
+        })
+        // A game is about to boot in this process: the in-app run (decrypt, decompress, write —
+        // 12+ workers) stops; the system goes on fetching the raw chunks, which this run
+        // assembles the next time the hub's library is open. Setting off: as before (it runs on).
+        observers.append(nc.addObserver(forName: KLBackgroundDownloads.gameWillStart, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handOffForGame() }
+        })
+        #endif
     }
 
+    #if KL_HUB
+    /// What the system is fetching for this game (staged raw chunks, tasks in flight).
+    var background: KLBackgroundDownloads.Status { KLBackgroundDownloads.shared.status(target: game.target) }
+
+    private func handOffForGame() {
+        guard KLDownloadSettings.background, task != nil else { return }
+        log("\(game.target): a game is starting — the in-app download stops here, the system keeps fetching")
+        task?.cancel()
+        stage = .paused
+    }
+    #endif
+
     /// Fraction of the game's bytes on disk while downloading/verifying, for the
-    /// library's "Downloading x%" — nil when nothing is running.
+    /// library's "Downloading x%" — nil when nothing is running. Downloading counts the raw
+    /// chunks the system already fetched (staged, not yet assembled) too: they are downloaded,
+    /// only not yet written into the game's files.
     var activeFraction: Double? {
         guard isBusy else { return nil }
         let p = progress
         switch p.phase {
         case .verifying: return p.verifyBytesTotal > 0 ? Double(p.verifyBytesDone) / Double(p.verifyBytesTotal) : 0
-        case .downloading, .finished:
-            return p.depotBytes > 0 ? Double(p.depotBytes - p.bytesToDownload + p.bytesDownloaded) / Double(p.depotBytes) : 0
+        case .downloading, .finished: return downloadBytes?.fraction ?? 0
         case .preparing: return 0
         }
+    }
+
+    /// The card's figures: written into the game's files, fetched by the system and waiting to be
+    /// assembled (bytes and pieces), and the whole depot.
+    struct DownloadBytes: Equatable {
+        var assembled: UInt64
+        var staged: UInt64
+        var stagedPieces: Int
+        var total: UInt64
+        var fraction: Double? { total > 0 ? min(1, Double(assembled + staged) / Double(total)) : nil }
+    }
+
+    /// The in-app run's own count while it downloads; otherwise the background lane's (set when
+    /// the run planned, then from its reports), else what is on disk. nil = nothing known yet.
+    var downloadBytes: DownloadBytes? {
+        let p = progress
+        var staged: UInt64 = 0, pieces = 0
+        var laneDone: UInt64 = 0, laneTotal: UInt64 = 0
+        #if KL_HUB
+        let bg = background
+        if bg.lanes > 0 { staged = bg.stagedBytes; pieces = bg.staged; laneDone = bg.doneBytes; laneTotal = bg.depotBytes }
+        #endif
+        if isBusy, p.phase == .downloading || p.phase == .finished, p.depotBytes > 0 {
+            let done = p.depotBytes - min(p.depotBytes, p.bytesToDownload) + p.bytesDownloaded
+            return DownloadBytes(assembled: done, staged: staged, stagedPieces: pieces, total: p.depotBytes)
+        }
+        if laneTotal > 0 { return DownloadBytes(assembled: laneDone, staged: staged, stagedPieces: pieces, total: laneTotal) }
+        if local.totalBytes > 0 {
+            return DownloadBytes(assembled: local.presentBytes, staged: staged, stagedPieces: pieces, total: local.totalBytes)
+        }
+        return nil
     }
 
     var isBusy: Bool {
@@ -288,6 +349,10 @@ final class SteamContentModel: ObservableObject {
     /// Main button: use the saved sign-in if there is one, otherwise show the sign-in form.
     func start(forceVerify: Bool = false) {
         self.forceVerify = forceVerify
+        #if KL_HUB
+        if KLDownloadSettings.background { KLDownloadIntent.set("steam", game.target, true) }
+        KLBackgroundDownloads.shared.setPaused(target: game.target, false)
+        #endif
         UserDefaults.standard.set(false, forKey: game.verifyNextLaunchKey)
         launch(.saved)
     }
@@ -329,6 +394,11 @@ final class SteamContentModel: ObservableObject {
     func pause() {
         task?.cancel()
         stage = .paused
+        #if KL_HUB
+        // The player's Pause holds the system's share too, until Resume.
+        KLDownloadIntent.set("steam", game.target, false)
+        KLBackgroundDownloads.shared.setPaused(target: game.target, true)
+        #endif
     }
 
     func cancelSignIn() {
@@ -349,14 +419,21 @@ final class SteamContentModel: ObservableObject {
     /// Token hand-off from the Mac: `steamdepot` on the Mac writes ~/.steamdepot/token.json;
     /// copying it to <Documents>/steamdepot-token.json (devicectl) imports it into the Keychain.
     private func importHandoffToken() {
+        if let name = Self.importHandoff() { account = name }
+    }
+
+    /// Imports a token the Mac app copied in ("Send to headset") and returns its account name.
+    /// Called when the library opens as well as before a download, so the hub shows the Steam
+    /// session (and "Download all" includes Steam games) without a sign-in first.
+    @discardableResult
+    static func importHandoff() -> String? {
         let handoff = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("steamdepot-token.json")
-        if let imported = try? FileCredentialStore(url: handoff).load() {
-            try? store.save(imported)
-            try? FileManager.default.removeItem(at: handoff)
-            account = imported.accountName
-            log("imported Steam token for '\(KLAccountPrivacy.mask(imported.accountName))' from Documents/steamdepot-token.json")
-        }
+        guard let imported = try? FileCredentialStore(url: handoff).load() else { return nil }
+        guard (try? KeychainCredentialStore(service: "SteamDepot.refreshToken", account: "steam").save(imported)) != nil else { return nil }
+        try? FileManager.default.removeItem(at: handoff)
+        NSLog("[steam] imported Steam token for '\(KLAccountPrivacy.mask(imported.accountName))' from Documents/steamdepot-token.json")
+        return imported.accountName
     }
 
     private func run(_ method: Method) async {
@@ -444,19 +521,45 @@ final class SteamContentModel: ObservableObject {
             depotCount = depots.count
             for (i, depot) in depots.enumerated() {
                 depotIndex = depots.count > 1 ? i + 1 : 0
-                let opts = DepotDownloadOptions(appID: game.appID, depotID: depot, branch: game.branch,
+                var opts = DepotDownloadOptions(appID: game.appID, depotID: depot, branch: game.branch,
                                                 directory: game.root, filters: SteamGameDescriptor.debugFilters,
                                                 include: game.include,
                                                 maxConcurrentDownloads: game.maxConcurrentDownloads,
                                                 verifyConcurrency: game.verifyConcurrency,
                                                 forceVerify: forceVerify)
+                #if KL_HUB
+                currentDepot = depot
+                // Raw chunks the system fetched meanwhile are taken first (whatever the setting is
+                // now); with the setting on, this run's remaining chunks go to the system too.
+                let bg = KLBackgroundDownloads.shared
+                let staging = bg.stagingDirectory(root: game.root, depot: depot)
+                opts.stagingDirectory = staging
+                if KLDownloadSettings.background {
+                    let target = game.target
+                    opts.onChunkPlan = { plan in
+                        bg.setLane(target: target, depot: plan.depotID, appID: plan.appID, manifest: plan.manifestID,
+                                   servers: plan.servers, staging: staging,
+                                   chunks: plan.chunks.map { ($0.id, $0.compressedLength, $0.uncompressedLength) },
+                                   workers: plan.workers, needsToken: plan.needsCDNToken,
+                                   depotBytes: plan.depotBytes, presentBytes: plan.presentBytes)
+                    }
+                }
+                #endif
                 let summary = try await downloader.download(opts) { p in
                     Task { @MainActor in self.update(p) }
                 }
+                #if KL_HUB
+                bg.clearLane(target: game.target, depot: depot)
+                currentDepot = nil
+                #endif
                 log("\(game.target) depot \(depot) done: \(summary.files) files, \(summary.skippedFiles) already there, "
-                    + "\(summary.bytesDownloaded) bytes fetched, verified \(summary.verifiedBytes) in \(summary.verifyElapsed)s")
+                    + "\(summary.bytesDownloaded) bytes fetched (\(summary.networkBytes) over the network), "
+                    + "verified \(summary.verifiedBytes) in \(summary.verifyElapsed)s")
             }
             stage = .complete
+            #if KL_HUB
+            KLDownloadIntent.set("steam", game.target, false)
+            #endif
         } catch is CancellationError {
             if case .signIn = stage { return }
             stage = .paused
@@ -472,6 +575,15 @@ final class SteamContentModel: ObservableObject {
     private func update(_ p: DownloadProgress) {
         guard task != nil else { return }
         progress = p
+        #if KL_HUB
+        if let depot = currentDepot, p.phase == .downloading || p.phase == .finished {
+            KLBackgroundDownloads.shared.noteProgress(target: game.target, depot: depot,
+                                                      chunksDone: max(0, p.chunksDone - p.chunksFromStaging),
+                                                      workers: game.maxConcurrentDownloads,
+                                                      doneBytes: p.depotBytes - p.bytesToDownload + p.bytesDownloaded,
+                                                      depotBytes: p.depotBytes)
+        }
+        #endif
         if p.phase == .verifying, p.verifyElapsed > 0 {
             verifySpeed = Double(p.verifyBytesDone) / p.verifyElapsed
         }
@@ -537,20 +649,34 @@ struct SteamContentView: View {
                 }
                 Text(model.game.title).font(.largeTitle.bold())
                 Spacer()
+                #if !KL_HUB
+                // The hub signs out from its Settings (Steam account), not from a game's page.
                 if model.account != nil {
                     Text(KLAccountPrivacy.steamLabel).font(.footnote).foregroundStyle(.secondary)
                     Button(klL("Sign out", "Cerrar sesión")) { model.signOut() }.font(.footnote).disabled(model.isBusy)
                 }
+                #endif
             }
             content
+            #if KL_HUB
+            SteamBackgroundLine(model: model)
+            #endif
             Spacer(minLength: 0)
             if model.isBusy {
-                Label(klL("Keep this window open and the headset on: visionOS pauses apps in the background, "
-                      + "and the download stops with it. It resumes where it left off on the next launch.",
-                      "Mantén esta ventana abierta y el visor puesto: visionOS pausa las apps en segundo plano "
-                      + "y la descarga se detiene con ellas. Se reanuda donde se quedó en el siguiente arranque."),
-                      systemImage: "exclamationmark.triangle")
-                    .font(.footnote).foregroundStyle(.secondary)
+                #if KL_HUB
+                if KLDownloadSettings.background {
+                    Label(klL("Keeps downloading in the background: while you play or with the hub closed, visionOS "
+                              + "fetches the game's files; they are checked and put in place when you open the hub again.",
+                              "Sigue descargando en segundo plano: mientras juegas o con el hub cerrado, visionOS "
+                              + "descarga los archivos del juego; se comprueban y se colocan al volver a abrir el hub."),
+                          systemImage: "info.circle")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else {
+                    SteamKeepOpenHint()
+                }
+                #else
+                SteamKeepOpenHint()
+                #endif
             }
         }
         .padding(32)
@@ -576,35 +702,8 @@ struct SteamContentView: View {
     @ViewBuilder private var content: some View {
         switch model.stage {
         case .idle: idle
-        case .connecting(let s):
-            HStack(spacing: 12) { ProgressView(); Text(s) }
-        case .signIn(let message):
-            SteamSignInForm(model: model, message: message)
-        case .guardCode(let type, let canApprove, let error):
-            SteamGuardCodeForm(model: model, type: type, canApprove: canApprove, error: error)
-        case .approve(let text):
-            VStack(alignment: .leading, spacing: 14) {
-                Text(klL("Confirm the sign-in", "Confirma el inicio de sesión")).font(.title2.bold())
-                HStack(spacing: 12) { ProgressView(); Text(text) }
-                Button(klL("Cancel", "Cancelar")) { model.cancelSignIn() }
-            }
-        case .qr(let url):
-            HStack(alignment: .top, spacing: 28) {
-                if let img = qrImage(url) {
-                    Image(uiImage: img).interpolation(.none).resizable().frame(width: 300, height: 300)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(klL("Sign in with a QR code", "Inicia sesión con un código QR")).font(.title2.bold())
-                    Text(klL("Scan it with the Steam app on a phone (Steam Guard shield → “Scan a QR code”). "
-                         + "A headset's own display can't be seen by a phone camera, so this mostly helps when "
-                         + "mirroring the view; the same link is written to the device log as “[steam] QR url:”.",
-                         "Escanéalo con la app de Steam en un móvil (escudo de Steam Guard → “Escanear un código QR”). "
-                         + "La cámara de un móvil no puede ver la pantalla del visor, así que sirve sobre todo "
-                         + "al duplicar la vista; el mismo enlace se escribe en el registro del dispositivo como “[steam] QR url:”."))
-                    Button(klL("Back", "Atrás")) { model.cancelSignIn() }
-                }
-            }
+        case .connecting, .signIn, .guardCode, .approve, .qr:
+            SteamSignInStages(model: model)
         case .working: working
         case .paused:
             VStack(alignment: .leading, spacing: 12) {
@@ -691,6 +790,91 @@ struct SteamContentView: View {
         if p.depotBytes > 0 {
             Text(klL("\(gbD(Double(p.depotBytes - p.bytesToDownload + p.bytesDownloaded))) of \(gb(p.depotBytes))", "\(gbD(Double(p.depotBytes - p.bytesToDownload + p.bytesDownloaded))) de \(gb(p.depotBytes))"))
                 .monospacedDigit().foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The in-process download's limits (background downloads off, or the single-game build).
+struct SteamKeepOpenHint: View {
+    var body: some View {
+        Label(klL("Keep this window open and the headset on: visionOS pauses apps in the background, "
+              + "and the download stops with it. It resumes where it left off on the next launch.",
+              "Mantén esta ventana abierta y el visor puesto: visionOS pausa las apps en segundo plano "
+              + "y la descarga se detiene con ellas. Se reanuda donde se quedó en el siguiente arranque."),
+              systemImage: "exclamationmark.triangle")
+            .font(.footnote).foregroundStyle(.secondary)
+    }
+}
+
+#if KL_HUB
+/// What the system fetched (or is fetching) for this game in the background, on its page.
+struct SteamBackgroundLine: View {
+    @ObservedObject var model: SteamContentModel
+    var body: some View {
+        let b = model.background
+        if b.lanes > 0 {
+            VStack(alignment: .leading, spacing: 4) {
+                if b.needsToken {
+                    Label(klL("Steam's server for this game wants a short-lived access token, which is not handed to the "
+                              + "system: this game downloads only while the hub is open.",
+                              "El servidor de Steam de este juego pide un token de acceso temporal, que no se entrega al "
+                              + "sistema: este juego solo se descarga con el hub abierto."),
+                          systemImage: "exclamationmark.triangle")
+                } else if b.paused {
+                    Label(klL("Background download paused.", "Descarga en segundo plano en pausa."), systemImage: "pause.circle")
+                } else {
+                    Label(klL("Background: \(b.staged) pieces ready to assemble (\(gb(b.stagedBytes))), \(b.inFlight) downloading, "
+                              + "\(b.remaining) queued.",
+                              "Segundo plano: \(b.staged) fragmentos listos para montar (\(gb(b.stagedBytes))), \(b.inFlight) descargándose, "
+                              + "\(b.remaining) en cola."),
+                          systemImage: "arrow.down.circle.dotted")
+                        .monospacedDigit()
+                }
+            }
+            .font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+}
+#endif
+/// The sign-in steps of a Steam run (and its "connecting" lines): the game's page shows them
+/// inline, the hub's card in a sheet (HubSteamSignInSheet). Signing in carries straight on into
+/// the download — the same run.
+struct SteamSignInStages: View {
+    @ObservedObject var model: SteamContentModel
+
+    var body: some View {
+        switch model.stage {
+        case .connecting(let s):
+            HStack(spacing: 12) { ProgressView(); Text(s) }
+        case .signIn(let message):
+            SteamSignInForm(model: model, message: message)
+        case .guardCode(let type, let canApprove, let error):
+            SteamGuardCodeForm(model: model, type: type, canApprove: canApprove, error: error)
+        case .approve(let text):
+            VStack(alignment: .leading, spacing: 14) {
+                Text(klL("Confirm the sign-in", "Confirma el inicio de sesión")).font(.title2.bold())
+                HStack(spacing: 12) { ProgressView(); Text(text) }
+                Button(klL("Cancel", "Cancelar")) { model.cancelSignIn() }
+            }
+        case .qr(let url):
+            HStack(alignment: .top, spacing: 28) {
+                if let img = qrImage(url) {
+                    Image(uiImage: img).interpolation(.none).resizable().frame(width: 300, height: 300)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(klL("Sign in with a QR code", "Inicia sesión con un código QR")).font(.title2.bold())
+                    Text(klL("Scan it with the Steam app on a phone (Steam Guard shield → “Scan a QR code”). "
+                         + "A headset's own display can't be seen by a phone camera, so this mostly helps when "
+                         + "mirroring the view; the same link is written to the device log as “[steam] QR url:”.",
+                         "Escanéalo con la app de Steam en un móvil (escudo de Steam Guard → “Escanear un código QR”). "
+                         + "La cámara de un móvil no puede ver la pantalla del visor, así que sirve sobre todo "
+                         + "al duplicar la vista; el mismo enlace se escribe en el registro del dispositivo como “[steam] QR url:”."))
+                    Button(klL("Back", "Atrás")) { model.cancelSignIn() }
+                }
+            }
+        default:
+            EmptyView()
         }
     }
 }

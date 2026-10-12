@@ -36,6 +36,10 @@
 //   KL_TESTHOST_HAPTICS_S 0       seconds between haptic buzzes (0 = never)
 //   KL_TESTHOST_SECONDS  0        run time, then BYE and exit (0 = forever)
 //   KL_TESTHOST_LOWLAT   1        try EnableLowLatencyRateControl
+//   KL_TESTHOST_BOOT_S   0        after a new client's HELLO, no video for this long:
+//                                 STATUS says BOOTING (a game loading on the Mac)
+//   KL_TESTHOST_VANISH   0        1: end without a BYE (a host that died) — the
+//                                 client must notice the silence on its own
 //
 // Build: make build/kl_stream_testhost      Run: ./build/kl_stream_testhost
 
@@ -79,6 +83,7 @@ static struct sockaddr_storage g_client;
 static socklen_t g_client_len;
 static int g_have_client;
 static double g_client_last;          // last packet from the client
+static double g_client_t0;            // when the current client's first HELLO came
 static kl_stream_hello g_hello;
 static kl_stream_pose g_pose;         // newest POSE
 static int g_have_pose;
@@ -171,6 +176,7 @@ static void *rx_main(void *arg) {
                            e[1].tan_left, e[1].tan_right, e[1].tan_up, e[1].tan_down,
                            (e[1].offset.x - e[0].offset.x) * 1000, g_frame_w, g_frame_h);
                     g_have_pose = 0;
+                    g_client_t0 = now_s();
                 }
             }
             a.frame_w = g_frame_w; a.frame_h = g_frame_h;
@@ -536,6 +542,8 @@ int main(int argc, char **argv) {
         CVPixelBufferPoolRef pool = NULL;
         uint32_t pool_w = 0, pool_h = 0;
         unsigned rendered = 0, hap_hand = 0;
+        double boot_s = env_f("KL_TESTHOST_BOOT_S", 0);
+        int was_booting = -1;
 
         while (!atomic_load(&g_quit)) {
             // Run the main queue briefly (Bonjour callbacks) and pace.
@@ -564,11 +572,23 @@ int main(int argc, char **argv) {
             else idr = 0;
             pthread_mutex_unlock(&g_mu);
 
-            if (have && now - last_ping > 1.0) {
+            // KL_TESTHOST_BOOT_S: the "game" is still loading — keepalive, no video.
+            pthread_mutex_lock(&g_mu);
+            double since_hello = now - g_client_t0;
+            pthread_mutex_unlock(&g_mu);
+            int booting = have && since_hello < boot_s;
+            if (have && (now - last_ping > 1.0 || booting != was_booting)) {
                 kl_stream_ping p = { .t_send = now };
+                kl_stream_keepalive k = { .state = booting ? KL_STREAM_HOST_BOOTING : KL_STREAM_HOST_RUNNING,
+                                          .seconds = (float)(booting ? since_hello : since_hello - boot_s),
+                                          .guest_frames = rendered };
                 pthread_mutex_lock(&g_mu);
                 send_to_client(&p, sizeof p, KL_STREAM_PING);
+                send_to_client(&k, sizeof k, KL_STREAM_STATUS);
                 pthread_mutex_unlock(&g_mu);
+                if (booting != was_booting)
+                    printf("[testhost] STATUS %s\n", booting ? "BOOTING (no video yet)" : "RUNNING");
+                was_booting = booting;
                 last_ping = now;
             }
             if (have && hap_s > 0 && now - last_hap > hap_s) {
@@ -594,7 +614,7 @@ int main(int argc, char **argv) {
                            g_fec_parity, g_tx_dropped);
                 g_frames_sent = 0; g_bytes_sent = 0; last_report = now;
             }
-            if (!have || !fw || !fh) continue;
+            if (!have || !fw || !fh || booting) continue;
 
             if (!g_enc || g_enc_w != fw || g_enc_h != fh) {
                 if (make_encoder(fw, fh) != 0) { fprintf(stderr, "[testhost] no encoder\n"); break; }
@@ -655,10 +675,14 @@ int main(int argc, char **argv) {
             if (idr) printf("[testhost] keyframe forced (frame %u)\n", g_frame_id);
         }
 
-        printf("[testhost] exiting — BYE\n");
-        pthread_mutex_lock(&g_mu);
-        for (int i = 0; i < 3; i++) { kl_stream_hdr b = {0}; send_to_client(&b, sizeof b, KL_STREAM_BYE); }
-        pthread_mutex_unlock(&g_mu);
+        if (env_int("KL_TESTHOST_VANISH", 0)) {
+            printf("[testhost] exiting WITHOUT a BYE (KL_TESTHOST_VANISH=1)\n");
+        } else {
+            printf("[testhost] exiting — BYE\n");
+            pthread_mutex_lock(&g_mu);
+            for (int i = 0; i < 3; i++) { kl_stream_hdr b = {0}; send_to_client(&b, sizeof b, KL_STREAM_BYE); }
+            pthread_mutex_unlock(&g_mu);
+        }
         atomic_store(&g_quit, 1);
         pthread_join(rx, NULL);
         if (g_dns) DNSServiceRefDeallocate(g_dns);

@@ -43,9 +43,12 @@ enum kl_stream_type {
     KL_STREAM_HAPTICS     = 6,   // host -> client, per hand, per host frame while buzzing
     KL_STREAM_PING        = 7,   // either way; PONG echoes t_send
     KL_STREAM_PONG        = 8,
-    KL_STREAM_BYE         = 9,   // either way; stop streaming
+    KL_STREAM_BYE         = 9,   // either way; stop streaming. Host -> client: the
+                                 // game on the Mac has ended (sent 3x: UDP, no ack)
     KL_STREAM_AUDIO       = 10,  // host -> client, the guest's PCM (additive in v2:
                                  // a v2 client without audio ignores the type)
+    KL_STREAM_STATUS      = 11,  // host -> client, ~1 Hz while a client is connected:
+                                 // the keepalive + what the guest is doing (additive)
 };
 
 enum kl_stream_status {
@@ -199,6 +202,25 @@ typedef struct {
     // followed by frames * channels int16
 } kl_stream_audio;
 #define KL_STREAM_AUDIO_MAX_FRAMES 288   // 288 * 2 ch * 2 B = 1152 <= KL_STREAM_MTU_PAYLOAD
+
+// The host's keepalive, once a second from HELLO_ACK on (and at once on a
+// state change). Between the ACK and the first VIDEO frame the game is still
+// booting on the Mac — Half-Life: Alyx takes tens of seconds, its intro sound
+// already playing — and without this the headset could not tell that from a
+// dead link. Any host packet is a sign of life; this one also says why there
+// is no picture yet. Additive in v2: a client that predates it ignores it and
+// still sees the host's PINGs.
+enum kl_stream_host_state {
+    KL_STREAM_HOST_BOOTING = 1,  // the guest is starting: no frame encoded yet
+    KL_STREAM_HOST_RUNNING = 2,  // frames are being encoded
+};
+typedef struct {
+    kl_stream_hdr h;
+    uint32_t      state;         // enum kl_stream_host_state
+    float         seconds;       // in that state so far
+    uint32_t      guest_frames;  // frames the guest has completed (0 while it loads)
+    uint32_t      reserved;
+} kl_stream_keepalive;
 
 #pragma pack(pop)
 

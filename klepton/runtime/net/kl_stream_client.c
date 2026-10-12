@@ -22,6 +22,18 @@
 //     it arrives. A decoder error is treated the same way.
 //   * The decoder runs synchronously on the receive thread and only the newest
 //     decoded picture is kept; the compositor pulls it once per display frame.
+//
+// Liveness — what decides "no signal" and "the session is over":
+//
+//   * ANY packet from the host is a sign of life: VIDEO, AUDIO, PING, and the
+//     host's 1 Hz STATUS keepalive. "No signal" is KL_STREAM_NOSIGNAL_S (3 s)
+//     with nothing at all — not a second without a picture, which is just
+//     what Alyx's boot looks like (tens of seconds, its intro sound already
+//     playing, STATUS saying BOOTING).
+//   * The session ends on the host's BYE (the game quit) or, once pictures
+//     have come, on KL_STREAM_LOST_S (5 s) of silence (the host died without
+//     one); before the first picture the silence allowed is
+//     KL_STREAM_LOST_BOOT_S (30 s).
 
 #include "kl_stream_client.h"
 #include "kl_ovrp.h"
@@ -115,8 +127,13 @@ struct kl_stream_client {
     int               have_display;
     kl_stream_hello   hello;
     double            last_hello;
-    int               acked, refused, ended;
+    int               acked, refused, ended, end_reason;
     double            t_ack;
+    double            t_last_rx;        // last packet of any kind from the host
+    uint32_t          host_state;       // the last STATUS (0 = none yet)
+    float             host_seconds;
+    double            t_host_state;     // when that STATUS arrived
+    uint32_t          host_guest_frames;
     kl_stream_hello_ack ack;
 
     // pose ring (render thread writes, rx thread reads)
@@ -822,6 +839,9 @@ static void klsc_on_packet(kl_stream_client *c, const uint8_t *pkt, size_t n) {
                               h.version, KL_STREAM_VERSION);
         return;
     }
+    pthread_mutex_lock(&c->mu);
+    c->t_last_rx = kl_stream_now();
+    pthread_mutex_unlock(&c->mu);
     switch (h.type) {
     case KL_STREAM_HELLO_ACK: {
         if (n < sizeof(kl_stream_hello_ack)) return;
@@ -881,13 +901,32 @@ static void klsc_on_packet(kl_stream_client *c, const uint8_t *pkt, size_t n) {
         pthread_mutex_unlock(&c->mu);
         break;
     }
-    case KL_STREAM_BYE:
+    case KL_STREAM_STATUS: {
+        if (n < sizeof(kl_stream_keepalive)) return;
+        kl_stream_keepalive k;
+        memcpy(&k, pkt, sizeof k);
+        pthread_mutex_lock(&c->mu);
+        uint32_t prev = c->host_state;
+        c->host_state = k.state;
+        c->host_seconds = k.seconds;
+        c->host_guest_frames = k.guest_frames;
+        c->t_host_state = kl_stream_now();
+        pthread_mutex_unlock(&c->mu);
+        if (prev != k.state)
+            klsc_log("[stream-client] host: %s (%.1f s, %u guest frames)",
+                     k.state == KL_STREAM_HOST_BOOTING ? "booting the game"
+                     : k.state == KL_STREAM_HOST_RUNNING ? "running" : "?",
+                     (double)k.seconds, k.guest_frames);
+        break;
+    }
+    case KL_STREAM_BYE: {
         pthread_mutex_lock(&c->mu);
         int was = c->ended;
-        c->ended = 1;
+        if (!was) { c->ended = 1; c->end_reason = KL_STREAM_END_BYE; }
         pthread_mutex_unlock(&c->mu);
-        if (!was) klsc_log("[stream-client] the host said BYE");
+        if (!was) klsc_log("[stream-client] the host said BYE: the game on the Mac has ended");
         break;
+    }
     default:
         break;
     }
@@ -953,6 +992,24 @@ static void *klsc_rx_main(void *arg) {
         }
         double now = kl_stream_now();
         pthread_mutex_lock(&c->mu);
+        // The host went silent without a BYE (killed, crashed, the Mac asleep
+        // or off the network): end the session rather than hold the last
+        // picture forever. Longer before the first picture — the host is
+        // booting the game then, but its keepalive never stops.
+        if (c->acked && !c->ended && !c->refused) {
+            double ref = c->t_last_rx > c->t_ack ? c->t_last_rx : c->t_ack;
+            float lim = c->t_last_video >= 0 ? kl_env_float("KL_STREAM_LOST_S", 5.0f)
+                                             : kl_env_float("KL_STREAM_LOST_BOOT_S", 30.0f);
+            if (lim > 0 && now - ref > lim) {
+                int had_video = c->t_last_video >= 0;
+                c->ended = 1;
+                c->end_reason = KL_STREAM_END_LOST;
+                pthread_mutex_unlock(&c->mu);
+                klsc_log("[stream-client] nothing from the host for %.1f s %s: the session is over",
+                         now - ref, had_video ? "after video" : "before any video");
+                pthread_mutex_lock(&c->mu);
+            }
+        }
         int have_display = c->have_display, acked = c->acked, done = c->refused || c->ended;
         pthread_mutex_unlock(&c->mu);
         if (!done && have_display && !acked && now - c->last_hello >= 1.0) klsc_send_hello(c);
@@ -1127,18 +1184,23 @@ void kl_stream_client_get_status(kl_stream_client *c, kl_stream_client_status *s
         s->interval_ms_mean = (float)m;
         s->interval_sd_ms_all = (float)(var > 0 ? sqrt(var) : 0);
     }
+    s->end_reason = c->ended ? c->end_reason : 0;
+    s->since_rx_s = c->acked ? now - (c->t_last_rx > c->t_ack ? c->t_last_rx : c->t_ack) : -1;
+    s->host_state = c->host_state;
+    // The host's seconds in that state, advanced to now.
+    s->host_seconds = c->host_state ? c->host_seconds + (float)(now - c->t_host_state) : 0;
+    s->host_guest_frames = c->host_guest_frames;
     if (c->ended)        s->state = KL_STREAM_CLIENT_ENDED;
     else if (c->refused) s->state = KL_STREAM_CLIENT_REFUSED;
     else if (!c->acked)  s->state = KL_STREAM_CLIENT_CONNECTING;
-    else {
-        // "No signal" is a second without a decoded picture — measured from
-        // the last picture, or from the ACK when there has never been one.
-        double ref = c->t_last_video >= 0 ? c->t_last_video : c->t_ack;
-        if (now - ref > kl_env_float("KL_STREAM_NOSIGNAL_S", 1.0f))
-            s->state = KL_STREAM_CLIENT_NO_SIGNAL;
-        else s->state = c->t_last_video >= 0 ? KL_STREAM_CLIENT_STREAMING
-                                             : KL_STREAM_CLIENT_WAITING;
-    }
+    else if (s->since_rx_s > kl_env_float("KL_STREAM_NOSIGNAL_S", 3.0f))
+        // "No signal" is NOTHING from the host — no video, audio, PING or
+        // STATUS — for a few seconds. A wait for the first picture with the
+        // host alive is WAITING (it is booting the game), and a picture that
+        // stalls with the host alive stays STREAMING (since_video_s says so).
+        s->state = KL_STREAM_CLIENT_NO_SIGNAL;
+    else s->state = c->t_last_video >= 0 ? KL_STREAM_CLIENT_STREAMING
+                                         : KL_STREAM_CLIENT_WAITING;
     pthread_mutex_unlock(&c->mu);
 }
 

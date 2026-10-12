@@ -1,17 +1,22 @@
 // `steamdepot cloud`: read-only Steam Cloud tools — list an app's cloud files, and show the sync plan
-// (dry run) for a local write layer. It never writes locally and never uploads: there is no apply here.
+// (dry run) for the game's local save folders. It never writes locally and never uploads: there is no apply here.
 // Sync policy adapted from Glovebox (MIT, github.com/glovebox-vr/glovebox)
 // launcher/Sources/SteamLauncherKit/Cloud/SteamCloud.swift.
 import Foundation
 import SteamDepot
 
 let cloudUsage = """
-usage: steamdepot cloud [--app 546560] [--list] [--plan] [--local <write layer>] [--state-dir <dir>]
+usage: steamdepot cloud [--app 546560] [--list] [--plan] [--local <folder>] [--state-dir <dir>]
                         [--mode download-only|two-way] [--token-file <path>] [--verbose]
   --list       list the app's Steam Cloud files (default when --plan is not given)
   --verify-download  also fetch the smallest and largest files into memory and check its SHA-1 (nothing saved)
-  --plan       dry-run sync plan against the local write layer (default for Alyx:
-               ~/Library/Application Support/Klepton/userdata/alyx/gameroot); nothing is written
+  --plan       dry-run sync plan against the game's local folder (Mac run of the port); nothing is written.
+               Apps with a save mapping and their default folder (under
+               ~/Library/Application Support/Klepton/userdata):
+                 546560  Half-Life: Alyx  alyx/gameroot (write layer)
+                 617830  SUPERHOT VR      superhot (android files; saves in files/)
+                 2669410 Metro Awakening  metro (android files; saves in UnrealGame/Impact/Impact/Saved/SaveGames)
+  --local      that folder instead of the default
   --state-dir  sync state/backups folder whose history to plan with (default: none = first sync)
 """
 
@@ -82,25 +87,37 @@ func runCloud(_ argv: ArraySlice<String>) async throws {
 
     guard plan else { await session.disconnect(); return }
     guard let profile = CloudSaveProfile.forApp(app) else {
-        throw CLIError("no local save mapping for app \(app) (only Half-Life: Alyx, 546560)")
+        let known = CloudSaveProfile.all.map { "\($0.appID) (\($0.target))" }.joined(separator: ", ")
+        throw CLIError("no local save mapping for app \(app); apps with one: \(known)")
     }
     let home = FileManager.default.homeDirectoryForCurrentUser
-    let layer = local.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
-        ?? CloudSaveProfile.defaultWriteLayer(target: "alyx", home: home)
+    var bases = profile.macBases(home: home)
+    if let local {
+        // Every profile maps its saves below one local folder; --local replaces it.
+        guard profile.bases.count == 1, let b = profile.bases.first else {
+            throw CLIError("--local is ambiguous for app \(app): it maps \(profile.bases.map(\.rawValue))")
+        }
+        bases[b] = URL(fileURLWithPath: (local as NSString).expandingTildeInPath)
+    }
+    let layer = profile.bases.compactMap { bases[$0] }.map(\.path).joined(separator: ", ")
     // Without --state-dir: an empty, never-written temp state = what a first sync would do.
     let state = stateDir.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
         ?? FileManager.default.temporaryDirectory.appendingPathComponent("steamdepot-cloud-plan-\(UUID().uuidString)")
-    let sync = profile.makeSync(remote: remote, rules: rules, writeLayer: layer, stateDir: state, mode: mode)
-    say("dry run (\(mode == .twoWay ? "two-way" : "download only")) against \(layer.path)")
+    let sync = profile.makeSync(remote: remote, rules: rules, bases: bases, stateDir: state, mode: mode)
+    say("dry run (\(mode == .twoWay ? "two-way" : "download only")) against \(layer)")
+    for r in rules {
+        say("  \(r.root):\(r.path) -> " + (sync.folder(for: r)?.path ?? "not mapped here (ignored)"))
+    }
     let (report, p) = try await sync.run(dryRun: true)
     for r in p.relocations { print("RELOCATE  slot \(r.from) → \(r.to)  (collides with a different cloud slot)") }
     for a in p.actions {
         switch a {
         case .inSync(let k, _): if verbose { print("in sync   \(k)") }
-        case .download(let k, _, let replacing): print("DOWNLOAD  \(k)\(replacing != nil ? "  (replaces local, backed up first)" : "")")
-        case .upload(let k, _, let over): print("UPLOAD    \(k)\(over != nil ? "  (over the cloud copy, backed up first)" : "  (new)")")
-        case .hold(let k, _, let why): print("hold      \(k)  (\(why == .downloadOnly ? "download-only" : "first two-way run records the baseline"))")
-        case .keepLocal(let k, _, let why): print("local     \(k)  (\(why == .neverUpload ? "never uploaded" : "unchanged since baseline"))")
+        // Cloud names in their own spelling (what would go up or come down); state keys are lowercased.
+        case .download(_, let r, let replacing): print("DOWNLOAD  \(r.filename)\(replacing != nil ? "  (replaces local, backed up first)" : "")")
+        case .upload(_, let l, let over): print("UPLOAD    \(l.cloudName)\(over != nil ? "  (over the cloud copy, backed up first)" : "  (new)")")
+        case .hold(_, let l, let why): print("hold      \(l.cloudName)  (\(why == .downloadOnly ? "download-only" : "first two-way run records the baseline"))")
+        case .keepLocal(_, let l, let why): print("local     \(l.cloudName)  (\(why == .neverUpload ? "never uploaded" : "unchanged since baseline"))")
         case .conflict(let c, _, _): print("CONFLICT  \(c.key)  (\(c.reason == .bothChanged ? "both changed" : "differs, no sync history"); both kept, nothing uploaded)")
         case .skipDeletedLocally(let k): print("skip      \(k)  (deleted here after sync; cloud copy kept)")
         case .skipDeletedInCloud(let k): print("skip      \(k)  (gone from the cloud after sync; local copy kept)")

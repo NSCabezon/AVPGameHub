@@ -342,8 +342,11 @@ hevc: build/t_hevc
 #
 # `make streamtest` runs one against the other on loopback, clean, then with
 # 1% packet loss twice: with the default FEC (losses rebuilt from parity) and
-# with KL_STREAM_FEC=0 (recovered by IDR requests). Not in `make
-# check`: it needs the hardware HEVC encoder and a free UDP port.
+# with KL_STREAM_FEC=0 (recovered by IDR requests); then the session's ends:
+# a host that "boots" for 6 s before its first picture (STATUS BOOTING: the
+# client must not say "no signal") and quits with a BYE, and a host that
+# vanishes without one (the client must end the session by itself). Not in
+# `make check`: it needs the hardware HEVC encoder and a free UDP port.
 .PHONY: testhost streamtest
 build/kl_stream_testhost: tools/kl_stream_testhost.m runtime/net/kl_stream_proto.h \
                           runtime/net/kl_stream_tx.c runtime/net/kl_stream_tx.h
@@ -377,6 +380,17 @@ streamtest: build/kl_stream_testhost build/kl_stream_harness
 	  sleep 0.5; ./build/kl_stream_harness 127.0.0.1 $(STREAMTEST_PORT) --seconds 6 --expect-loss \
 	    --out build/stream/lossy-nofec > build/stream/lossy-nofec/client.log 2>&1; rc=$$?; \
 	  grep -E 'harness: [0-9]|PASS|FAIL' build/stream/lossy-nofec/client.log; wait; exit $$rc
+	@mkdir -p build/stream/boot-bye build/stream/vanish
+	@KL_TESTHOST_PORT=$(STREAMTEST_PORT) KL_TESTHOST_NAME="klepton streamtest" KL_TESTHOST_SECONDS=10 \
+	  KL_TESTHOST_BOOT_S=6 ./build/kl_stream_testhost > build/stream/boot-bye/host.log 2>&1 & \
+	  sleep 0.5; ./build/kl_stream_harness 127.0.0.1 $(STREAMTEST_PORT) --seconds 15 --expect-end bye \
+	    --out build/stream/boot-bye > build/stream/boot-bye/client.log 2>&1; rc=$$?; \
+	  grep -E 'harness: \+|first picture at|PASS|FAIL' build/stream/boot-bye/client.log; wait; exit $$rc
+	@KL_TESTHOST_PORT=$(STREAMTEST_PORT) KL_TESTHOST_NAME="klepton streamtest" KL_TESTHOST_SECONDS=4 \
+	  KL_TESTHOST_VANISH=1 ./build/kl_stream_testhost > build/stream/vanish/host.log 2>&1 & \
+	  sleep 0.5; ./build/kl_stream_harness 127.0.0.1 $(STREAMTEST_PORT) --seconds 15 --expect-end lost \
+	    --out build/stream/vanish > build/stream/vanish/client.log 2>&1; rc=$$?; \
+	  grep -E 'harness: \+|first picture at|PASS|FAIL' build/stream/vanish/client.log; wait; exit $$rc
 
 # The video TEXTURE gate: a natively-decoded biplanar frame through
 # CVMetalTextureCache + EGL_METAL_TEXTURE_ANGLE to sampled pixels, compared
@@ -590,6 +604,10 @@ bcast: build/t_bcast
 
 # The glibc personality's in-process SysV semaphores and fault-signal masks,
 # through the same kl_glibc_lookup entry points a glibc guest binds.
+build/t_dylibpath: tests/t_dylibpath.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_dylibpath.c $(RUNTIME) $(LDLIBS)
+
 build/t_glibc_ipc: tests/t_glibc_ipc.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_glibc_ipc.c $(RUNTIME) $(LDLIBS)
@@ -677,8 +695,10 @@ il2cpp: build/t_il2cpp
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_x18_casp build/t_bcast build/t_glibc_ipc build/t_fault build/t_glcaps
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_xrinput build/t_softinput build/t_ctr build/t_x18_casp build/t_bcast build/t_glibc_ipc build/t_fault build/t_glcaps build/t_dylibpath
 	@echo "=== variadic ABI ===" && ./build/t_variadic
+	@./build/t_dylibpath > build/dylibpath.log 2>&1 || { cat build/dylibpath.log; exit 1; }
+	@head -1 build/dylibpath.log && tail -1 build/dylibpath.log
 	@echo "=== crash reporter ===" && ./build/t_fault
 	@echo "=== GL limits vs ANGLE ===" && ./build/t_glcaps vendor/out/Debug
 	@./build/t_hevc > build/hevc.log 2>&1 || { cat build/hevc.log; exit 1; }
@@ -988,6 +1008,15 @@ xros-device: build/xros/libklepton.dylib
 xros-sim: build/xrsim/libklepton.dylib
 	@printf '  xrsim      '; xcrun vtool -show-build $< | grep -E 'platform' | tr -d '\n'
 	@printf '  %s\n' "$$(ls -l $< | awk '{print $$5" bytes"}')"
+
+# The hub as an App Store Connect build for INTERNAL TestFlight: Release archive,
+# App Store signed .ipa exported to visionos/build/testflight/, and the local
+# pre-flight checks (visionos/tf_check.py). Uploads nothing unless UPLOAD=1.
+# Needs KLEPTON_TEAM and KLEPTON_BUNDLE_ID (your App Store Connect app's id).
+#   KLEPTON_TEAM=... KLEPTON_BUNDLE_ID=... make testflight [UPLOAD=1]
+.PHONY: testflight
+testflight:
+	./build_run_vpro.sh hub --archive $(if $(filter 1,$(UPLOAD)),--upload)
 
 # The two archives as one XCFramework, so the app target links the right slice
 # without a per-platform search path. Xcode resolves the slice from the

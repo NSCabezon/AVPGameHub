@@ -19,10 +19,14 @@ kl_image *kl_load(const char *path);
 // TLS and x18 rewrites happened offline. This is the path that has to work on
 // visionOS; kl_load() above is the development one. Same kl_image afterwards.
 kl_image *kl_load_dylib(const char *path);
-// Pick between the two: with KL_DYLIB_DIR set, prefer <dir>/<name>.dylib when a
-// translation exists, else the ELF. Lets the boot chain run mixed while some
-// libraries are still untranslatable. Every guest-library load goes through it.
+// Pick between the two: with KL_DYLIB_DIR set, prefer <dir>/<prefix><name>.dylib
+// (or .framework) when a translation exists, else the ELF. Lets the boot chain
+// run mixed while some libraries are still untranslatable. Every guest-library load goes through it.
 kl_image *kl_load_auto(const char *path);
+// The per-game file-name prefix of a translated library (KL_DYLIB_PREFIX), ""
+// when unset. A bundle keeps every game's translations flat in Frameworks/ as
+// <prefix><lib>.framework/<prefix><lib>; the guest never sees the prefix.
+const char *kl_dylib_prefix(void);
 
 // Could kl_load_auto load a guest library at `path`? Ask this — never
 // stat(path) — whenever answering an existence question about a guest library on

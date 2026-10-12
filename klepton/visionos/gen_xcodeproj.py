@@ -127,11 +127,13 @@ if ENTITLEMENTS and _dropped:
 
 ENTITLEMENTS_SETTING = (f"\t\t\t\tCODE_SIGN_ENTITLEMENTS = {ENTITLEMENTS_FILE};\n"
                         if ENTITLEMENTS else "")
-# The HUB (targets.py kind "hub") embeds several guests at once, each into its
-# OWN Frameworks/<game>/ subfolder of the .app, so same-named translations from
-# two games (libunity, libUE4, libc++_shared) cannot collide. kl_app.c looks in
-# Frameworks/<selected game>/ first. A single-target build is unchanged: its
-# guest lands flat in Frameworks/, exactly as before.
+# The HUB (targets.py kind "hub") embeds several guests at once, ALL flat in the
+# .app's Frameworks/ like a single-target build's: App Store validation rejects
+# anything but a framework or a dylib directly in Frameworks/ (ITMS-90432), so the
+# per-game subfolders this used to make cannot ship. Same-named translations from
+# two games (libunity, libil2cpp, libc++_shared) cannot collide anyway, because
+# mkguest.sh names every framework <game>__<lib> and kl_app.c tells the runtime
+# which prefix is the selected game's.
 #
 # KLEPTON_HUB_NO_GUESTS=1 leaves the games' frameworks out — a UI-only build
 # (the library, for the simulator, where the device-only translations have no
@@ -171,11 +173,11 @@ MVK = ["MoltenVK"] if os.path.isdir(
     os.path.join(HERE, "Frameworks", "MoltenVK.xcframework")) else []
 # Where each set is staged on the SOURCE side. The guest's is per-target so the
 # two apps do not overwrite each other's translations in place; ANGLE's is not,
-# because it is the same renderer for every guest. Inside the built .app both
-# land flat in Frameworks/, which is why kl_app.c needs to know nothing about it.
+# because it is the same renderer for every guest. Inside the built .app all of
+# them land flat in Frameworks/ — the guest's under their <game>__ prefix.
 GUEST_DIR = f"Frameworks/{KLT['name']}"
 ANGLE_DIR = "Frameworks"
-def guest_dir(game): return f"Frameworks/{game}"
+def guest_dir(game): return f"Frameworks/{game}"   # source side only
 # Both sets are embedded-not-linked, so the pbxproj treatment is identical and
 # the generator stays data-driven — the two lists differ only in what a missing
 # one means, which is why main() reports them separately.
@@ -370,6 +372,8 @@ if IS_HUB:
     # itself (compiled out without the MetaStore package).
     swift.append({"name": "KleptonCatalog.swift", "ref": _fixed("HUBCATF"), "bld": _fixed("HUBCATB")})
     swift.append({"name": "KleptonMetaContent.swift", "ref": _fixed("HUBMETAF"), "bld": _fixed("HUBMETAB")})
+    # The system background download session (Steam chunks) and the download settings.
+    swift.append({"name": "KleptonBackgroundDownloads.swift", "ref": _fixed("HUBBGDLF"), "bld": _fixed("HUBBGDLB")})
     swift.append({"name": "../" + HUB_MANIFEST_REL, "ref": _fixed("HUBMANF"), "bld": _fixed("HUBMANB")})
 # Per-session performance summary (the compositor measures, the hub shows it).
 # Every target: the compositor calls it. Fixed ids, so the numbering above is kept.
@@ -391,6 +395,12 @@ SHORTCUTS_FILEREF = "".join(f'\t\t{f} = {{isa = PBXFileReference; lastKnownFileT
                             f'path = {n}; sourceTree = "<group>"; }};\n' for n, f, b in _CATALOGS)
 SHORTCUTS_CHILD = "".join(f"\t\t\t\t{f},\n" for n, f, b in _CATALOGS)
 SHORTCUTS_RES = "".join(f"\t\t\t\t{b},\n" for n, f, b in _CATALOGS)
+
+# The privacy manifest (PrivacyInfo.xcprivacy: the required-reason APIs the app
+# calls, and that it tracks and collects nothing). App Store Connect reads it from
+# the bundle root and refuses an upload that uses those APIs without one; every
+# target carries it, since the runtime that makes most of the calls is shared.
+F_PRIV, B_PRIV = _fixed("PRIVINFOF"), _fixed("PRIVINFOB")
 
 # The two files apktool leaves beside assets/ — apktool.yml (versionCode /
 # versionName) and the decoded AndroidManifest.xml (package, <meta-data>,
@@ -416,7 +426,8 @@ def hub_manifest():
     for g in HUB_ALL:
         t = targets_mod.TARGETS[g]
         rows.append('    KLHubGameRow(target: "%s", display: "%s", kind: "%s", entry: "%s", bundled: %s,\n'
-                    '                 tree: "%s", apk: "%s", renderScale: %.2f, foveation: %s, glFoveation: %s, meta: %s),'
+                    '                 tree: "%s", apk: "%s", renderScale: %.2f, foveation: %s, glFoveation: %s,\n'
+                    '                 macStream: %s, meta: %s),'
                     % (g, t["display"].replace('"', '\\"'), t["kind"], t["entry"],
                        "true" if g in HUB_GAMES and not HUB_NO_GUESTS else "false", t["tree"], t["apk"],
                        # The game's own render-scale and foveation defaults
@@ -425,7 +436,9 @@ def hub_manifest():
                        float(t.get("render_scale", 1.0)),
                        "true" if t.get("foveation", True) else "false",
                        # "gl_foveation": False for a Vulkan guest (no GL rate map).
-                       "true" if t.get("gl_foveation", True) else "false", hub_meta(t)))
+                       "true" if t.get("gl_foveation", True) else "false",
+                       # "mac_stream": the hub offers Play from Mac.
+                       "true" if t.get("mac_stream", False) else "false", hub_meta(t)))
     return ("// GENERATED by visionos/gen_xcodeproj.py from visionos/targets.py (hub \"%s\")"
             " - do not edit.\n// Add a game to the hub's \"games\" list in targets.py and regenerate.\n"
             "let klHubGameRows: [KLHubGameRow] = [\n%s\n]\n"
@@ -482,8 +495,7 @@ F_RT    = oid("FRT");   B_RT_LNK = oid("BRTLK")
 
 # One file ref + one embed build-file per embedded framework.
 if IS_HUB:
-    # Per game: its own copy phase (dstPath = the game's name, under Frameworks/).
-    # Fixed ids keyed on the game's position, for the same reason as the package's.
+    # Every game's frameworks, then ANGLE/MoltenVK, all into the one Embed phase.
     _pairs = [(l, g) for g, libs in GUEST_SETS for l in libs] + [(a, None) for a in ANGLE + MVK]
     guest = [{"name": n, "ref": oid(f"FG{i}"), "emb": oid(f"BG{i}"),
               "dir": guest_dir(g) if g else ANGLE_DIR, "game": g}
@@ -505,12 +517,13 @@ buildfiles = "\n".join(
 #
 # A HUB game's frameworks are referenced as the platform SLICE's .framework, not
 # as the .xcframework. Xcode first "processes" every xcframework into one flat
-# BUILT_PRODUCTS_DIR/<name>.framework, so two games shipping a library of the
-# same name (alyx and superhot both carry libphonon) fail the build with
-# "Multiple commands produce .../libphonon.framework" before the per-game copy
-# phases ever run. A plain .framework is copied (and signed) straight from its
-# source into Frameworks/<game>/, so same-named ones never meet. The slice is the
-# one this run builds for (run.sh exports XROS_PLATFORMS; device by default).
+# BUILT_PRODUCTS_DIR/<LibraryPath>; that once failed the build ("Multiple commands
+# produce .../libphonon.framework") when two games shipped the same library. The
+# <game>__ prefix keeps them apart now, but the slice is still the simpler input:
+# a plain .framework is copied (and signed) straight from its source into
+# Frameworks/.
+# The slice is the one this run builds for (run.sh exports XROS_PLATFORMS;
+# device by default).
 def hub_slice(xcfw):
     import plistlib
     want_sim = os.environ.get("XROS_PLATFORMS", "xros").split()[0] == "xrsim"
@@ -531,21 +544,9 @@ def fileref(g):
             f'name = "{g["name"]}.xcframework"; path = "{xcfw}"; sourceTree = "<group>"; }};')
 filerefs = "\n".join(fileref(g) for g in guest)
 
-embeds = "\n".join(f'\t\t\t\t{g["emb"]},' for g in guest if not g["game"])
-# The hub's per-game embed phases (none for a single-target build).
-HUB_PHASES = [(game, _fixed(f"HUBEMB{i}")) for i, game in enumerate(HUB_GAMES) if not HUB_NO_GUESTS]
-HUB_PHASE_IDS = "".join(f"\t\t\t\t{pid} /* Embed {game} */,\n" for game, pid in HUB_PHASES)
-HUB_PHASE_SECTIONS = "".join(f"""\t\t{pid} /* Embed {game} */ = {{
-\t\t\tisa = PBXCopyFilesBuildPhase;
-\t\t\tbuildActionMask = 2147483647;
-\t\t\tdstPath = "{game}";
-\t\t\tdstSubfolderSpec = 10;
-\t\t\tfiles = (
-""" + "".join(f'\t\t\t\t{g["emb"]},\n' for g in guest if g["game"] == game) + f"""\t\t\t);
-\t\t\tname = "Embed {game}";
-\t\t\trunOnlyForDeploymentPostprocessing = 0;
-\t\t}};
-""" for game, pid in HUB_PHASES)
+# ONE Embed phase into Frameworks/ itself (dstPath ""), for every guest framework
+# of every game and for ANGLE/MoltenVK: nothing may sit in a subfolder there.
+embeds = "\n".join(f'\t\t\t\t{g["emb"]},' for g in guest)
 fwchildren = "\n".join(f'\t\t\t\t{g["ref"]},' for g in guest)
 
 # Compile-time opt-in for the custom "configure, then Start" launcher (hl1/hl2/
@@ -699,6 +700,7 @@ PBX = f"""// !$*UTF8*$!
 {swift_buildfiles}
 		{B_C} /* kl_app.c in Sources */ = {{isa = PBXBuildFile; fileRef = {F_C}; }};
 		{B_ASSETS} /* Assets.xcassets in Resources */ = {{isa = PBXBuildFile; fileRef = {F_ASSETS}; }};
+		{B_PRIV} /* PrivacyInfo.xcprivacy in Resources */ = {{isa = PBXBuildFile; fileRef = {F_PRIV}; }};
 		{B_RT_LNK} /* Klepton.xcframework in Frameworks */ = {{isa = PBXBuildFile; fileRef = {F_RT}; }};
 {PKG_BUILDFILE}{SHORTCUTS_BUILDFILE}{buildfiles}
 /* End PBXBuildFile section */
@@ -710,6 +712,7 @@ PBX = f"""// !$*UTF8*$!
 		{F_H} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = kl_app.h; sourceTree = "<group>"; }};
 		{F_BRIDGE} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Klepton-Bridging-Header.h"; sourceTree = "<group>"; }};
 		{F_ASSETS} = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = {_appicon_catalog}; sourceTree = "<group>"; }};
+		{F_PRIV} = {{isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; }};
 		{F_RT} = {{isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Klepton.xcframework; path = ../build/Klepton.xcframework; sourceTree = "<group>"; }};
 {SHORTCUTS_FILEREF}{filerefs}
 /* End PBXFileReference section */
@@ -737,7 +740,7 @@ PBX = f"""// !$*UTF8*$!
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
-{HUB_PHASE_SECTIONS}/* End PBXCopyFilesBuildPhase section */
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXGroup section */
 		{G_ROOT} = {{
@@ -747,6 +750,7 @@ PBX = f"""// !$*UTF8*$!
 				{G_FW},
 				{G_PROD},
 				{F_ASSETS},
+				{F_PRIV},
 			);
 			sourceTree = "<group>";
 		}};
@@ -789,7 +793,7 @@ PBX = f"""// !$*UTF8*$!
 				{BP_FRM},
 				{BP_RES},
 				{BP_EMB},
-{HUB_PHASE_IDS}			);
+			);
 			buildRules = ();
 			dependencies = ();
 			name = {NAME};
@@ -831,6 +835,7 @@ PBX = f"""// !$*UTF8*$!
 			buildActionMask = 2147483647;
 			files = (
 				{B_ASSETS},
+				{B_PRIV},
 {SHORTCUTS_RES}			);
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
@@ -932,6 +937,22 @@ def main():
         if not os.path.isdir(p):
             print(f"!! missing {p} — run {how} first", file=sys.stderr)
             return 1
+    # Translations from before the flat layout carry no <game>__ prefix; embedded
+    # flat they would collide across games and the runtime would not find them
+    # (kl_app.c looks for <game>__<entry>). KL_SKIP_GUEST=1 reuses whatever is on
+    # disk, so this is where a stale set shows up.
+    import plistlib
+    for game, libs in GUEST_SETS:
+        for l in libs:
+            ip = os.path.join(HERE, guest_dir(game), f"{l}.xcframework", "Info.plist")
+            with open(ip, "rb") as f:
+                paths = [x.get("LibraryPath", "") for x in plistlib.load(f).get("AvailableLibraries", [])]
+            stale = [x for x in paths if not x.startswith(f"{game}__")]
+            if stale:
+                print(f"!! {ip}: {', '.join(stale)} predates the flat Frameworks/ layout "
+                      f"(want {game}__<lib>.framework) — re-run KLEPTON_TARGET={game} "
+                      f"visionos/mkguest.sh (or drop KL_SKIP_GUEST)", file=sys.stderr)
+                return 1
     if not os.path.isdir(os.path.join(HERE, "..", "build", "Klepton.xcframework")):
         print("!! missing build/Klepton.xcframework — run `make xros` first", file=sys.stderr)
         return 1
@@ -964,7 +985,7 @@ def main():
         print(f"  Swift package MetaStore: {METASTORE_PKG} (in-app Meta store download)")
     if IS_HUB:
         for game, libs in GUEST_SETS:
-            print(f"  hub game {game:<14} -> Frameworks/{game}/: "
+            print(f"  hub game {game:<14} -> Frameworks/{game}__*.framework: "
                   + (f"{len(libs)} frameworks" if libs else "(none - KLEPTON_HUB_NO_GUESTS)"))
         for game in HUB_ALL:
             if game not in HUB_GAMES:

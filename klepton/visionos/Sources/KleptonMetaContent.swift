@@ -139,6 +139,7 @@ final class MetaContentModel: ObservableObject {
     /// A pack was added while a download ran (its plan was made without it): go again after.
     private var rerun = false
     var interruptedByBackground = false
+    private var gameObserver: NSObjectProtocol?
 
     init(target: String, recipe: Recipe) {
         self.target = target
@@ -147,6 +148,20 @@ final class MetaContentModel: ObservableObject {
         self.voiceLocales = KLCatalog.metaVoiceLocales(target, recipe)
         refreshLocal()
         if complete { stage = .complete }
+        // Meta files are not handed to the system's background downloads: Meta serves them only to
+        // a request carrying the account token, and a background task's request (header included)
+        // is kept on disk by the system. They download in this process, so they go on while a game
+        // runs here; "Pausar descargas mientras juegas" stops them at the game's start instead, and
+        // either way the hub resumes them by itself the next time its library opens.
+        gameObserver = NotificationCenter.default.addObserver(forName: KLBackgroundDownloads.gameWillStart, object: nil,
+                                                              queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isBusy, KLDownloadSettings.background, KLDownloadSettings.pauseWhilePlaying else { return }
+                self.log("a game is starting — paused until the hub opens again")
+                self.task?.cancel()
+                self.stage = .paused
+            }
+        }
     }
 
     var account: MetaAccountModel { MetaAccountModel.shared }
@@ -247,6 +262,7 @@ final class MetaContentModel: ObservableObject {
 
     func start() {
         guard task == nil else { return }
+        if KLDownloadSettings.background { KLDownloadIntent.set("meta", target, true) }
         UIApplication.shared.isIdleTimerDisabled = true
         samples = []
         task = Task { [weak self] in
@@ -270,6 +286,7 @@ final class MetaContentModel: ObservableObject {
     func pause() {
         task?.cancel()
         stage = .paused
+        KLDownloadIntent.set("meta", target, false)
     }
 
     private func log(_ s: String) { NSLog("[meta] \(target): \(s)") }
@@ -335,7 +352,7 @@ final class MetaContentModel: ObservableObject {
                 }, log: { [target] s in NSLog("[meta] \(target): \(s)") })
             log("done: \(summary.downloaded) downloaded, \(summary.kept) kept, \(summary.withheld.count) withheld")
             refreshLocal()
-            if complete { stage = .complete }
+            if complete { stage = .complete; KLDownloadIntent.set("meta", target, false) }
             else if voiceLocales != locales, rerun { stage = .idle }   // a pack added meanwhile: start() goes again
             else {
                 stage = .failed(klL("Download finished but the files are not complete.",
@@ -401,12 +418,21 @@ struct MetaContentView: View {
             content
             if !model.voicePacks.isEmpty { MetaVoicePacksSection(model: model) }
             if model.isBusy {
-                Label(klL("Keep this window open and the headset on: visionOS pauses apps in the background, "
-                          + "and the download stops with it. It resumes where it left off.",
-                          "Deja esta ventana abierta y el visor puesto: visionOS pausa las apps en segundo plano "
-                          + "y la descarga se para con ellas. Sigue donde se quedó."),
-                      systemImage: "exclamationmark.triangle")
-                    .font(.footnote).foregroundStyle(.secondary)
+                if KLDownloadSettings.background {
+                    Label(klL("Meta downloads run inside the hub: they go on while you play a game from it, but stop "
+                              + "when the hub closes, and continue by themselves the next time you open it.",
+                              "Las descargas de Meta van dentro del hub: siguen mientras juegas a un juego desde él, "
+                              + "pero se paran al cerrar el hub y continúan solas la próxima vez que lo abras."),
+                          systemImage: "info.circle")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else {
+                    Label(klL("Keep this window open and the headset on: visionOS pauses apps in the background, "
+                              + "and the download stops with it. It resumes where it left off.",
+                              "Deja esta ventana abierta y el visor puesto: visionOS pausa las apps en segundo plano "
+                              + "y la descarga se para con ellas. Sigue donde se quedó."),
+                          systemImage: "exclamationmark.triangle")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -191,6 +191,8 @@ final class KLStreamSession: @unchecked Sendable {
     private var tangents = [SIMD4<Float>](repeating: .zero, count: 2)
     private var haveTangents = [false, false]
     private var lastHUD: TimeInterval = 0
+    /// The session ended and the view went black over the last picture.
+    private var endFaded = false
     private var simYaw: Float = 0
     private var simLast: TimeInterval = 0
     /// The last frame id handed to the compositor (its "guest frame serial").
@@ -211,6 +213,9 @@ final class KLStreamSession: @unchecked Sendable {
         // (idempotent; before the socket, so the first packet finds it ready).
         KleptonAudio.start()
         guard let c = kl_stream_client_create(host, Int32(port)) else { return false }
+        // A previous session may have ended under its black fade (updateHUD, ENDED).
+        kl_ovrp_fade_to(0, 0, 0, 0, 0)
+        endFaded = false
         lock.lock()
         client = c
         active = true
@@ -236,6 +241,27 @@ final class KLStreamSession: @unchecked Sendable {
         NSLog("[stream] session stopping (\(reason))")
         kl_stream_client_destroy(c)
         KLHUDStatus.set(nil)
+    }
+
+    /// After the immersive space is gone: lift the black the ended session left
+    /// in kl_ovrp's fade, so nothing that composites next (another stream, a
+    /// local game) starts under it.
+    func clearEndFade() {
+        kl_ovrp_fade_to(0, 0, 0, 0, 0)
+        endFaded = false
+    }
+
+    /// Whether the host's last keepalive said it is still booting the game.
+    static func hostBooting(_ s: kl_stream_client_status) -> Bool {
+        Int(s.host_state) == Int(KL_STREAM_HOST_BOOTING.rawValue)
+    }
+
+    /// The ended session's card title: the game quit on the Mac (BYE), or the
+    /// Mac went silent.
+    static func endedTitle(_ s: kl_stream_client_status, mac: String) -> String {
+        Int(s.end_reason) == Int(KL_STREAM_END_LOST)
+            ? klL("Lost the connection to \(mac)", "Se perdió la conexión con \(mac)")
+            : klL("The game on the Mac has ended", "La partida en el Mac ha terminado")
     }
 
     private var current: OpaquePointer? {
@@ -325,16 +351,36 @@ final class KLStreamSession: @unchecked Sendable {
             card = KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: klL("Connecting to \(mac)…", "Conectando a \(mac)…"),
                                desc: klL("Waiting for the Mac to answer (\(hostDesc)).", "Esperando respuesta del Mac (\(hostDesc))."))
         case Int32(KL_STREAM_CLIENT_WAITING):
-            card = KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: klL("Connecting to \(mac)…", "Conectando a \(mac)…"),
-                               desc: klL("Connected. Waiting for the first picture.", "Conectado. Esperando la primera imagen."))
+            // Connected, the host alive (its keepalive, audio): it is booting
+            // the game, which takes a while — the intro sound can come first.
+            // The seconds are whole so the card is not re-rastered every 0.1 s.
+            let secs = Int(s.host_seconds)
+            card = KLStreamSession.hostBooting(s)
+                ? KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"),
+                              name: klL("Starting the game on the Mac…", "Arrancando el juego en el Mac…"),
+                              desc: klL("\(mac) is loading it (\(secs) s). The sound may start before the picture.",
+                                        "\(mac) lo está cargando (\(secs) s). El sonido puede llegar antes que la imagen."))
+                : KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: klL("Connecting to \(mac)…", "Conectando a \(mac)…"),
+                              desc: klL("Connected. Waiting for the first picture.", "Conectado. Esperando la primera imagen."))
+        case Int32(KL_STREAM_CLIENT_STREAMING) where s.since_video_s > 2:
+            // The Mac is still there (keepalive, audio) but the picture stopped.
+            card = KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: klL("Waiting for the picture…", "Esperando la imagen…"),
+                               desc: klL("\(mac) is still connected; the picture has paused.", "\(mac) sigue conectado; la imagen se ha detenido."))
         case Int32(KL_STREAM_CLIENT_NO_SIGNAL):
             card = KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: klL("No signal from the Mac", "Sin señal del Mac"),
-                               desc: klL("No video from \(mac). Retrying…", "No llega vídeo de \(mac). Reintentando…"))
+                               desc: klL("Nothing has arrived from \(mac) for \(Int(s.since_rx_s)) s. Retrying…",
+                                         "No llega nada de \(mac) desde hace \(Int(s.since_rx_s)) s. Reintentando…"))
         case Int32(KL_STREAM_CLIENT_REFUSED):
             card = KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: klL("\(mac) refused the connection", "\(mac) rechazó la conexión"),
                                desc: KLStreamSession.refusal(s.ack_status))
         case Int32(KL_STREAM_CLIENT_ENDED):
-            card = KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: klL("\(mac) ended the session", "\(mac) cerró la sesión"),
+            // The last picture would otherwise stay up, reprojected, until the
+            // space closes: fade it to black under the card.
+            if !endFaded {
+                endFaded = true
+                kl_ovrp_fade_to(0, 0, 0, 1, 0.3)
+            }
+            card = KLHUDStatus(header: klL("Play from Mac", "Jugar desde el Mac"), name: KLStreamSession.endedTitle(s, mac: mac),
                                desc: klL("Back to the library.", "Volviendo a la biblioteca."))
         default:
             card = nil
@@ -635,7 +681,11 @@ struct StreamPlayView: View {
                 }
                 switch Int32(s.state) {
                 case Int32(KL_STREAM_CLIENT_CONNECTING): phase = klL("Connecting to \(target.name)…", "Conectando a \(target.name)…")
-                case Int32(KL_STREAM_CLIENT_WAITING):    phase = klL("Connected. Waiting for the first picture…", "Conectado. Esperando la primera imagen…")
+                case Int32(KL_STREAM_CLIENT_WAITING):
+                    phase = KLStreamSession.hostBooting(s)
+                        ? klL("Starting the game on \(target.name)… (\(Int(s.host_seconds)) s)",
+                              "Arrancando el juego en \(target.name)… (\(Int(s.host_seconds)) s)")
+                        : klL("Connected. Waiting for the first picture…", "Conectado. Esperando la primera imagen…")
                 case Int32(KL_STREAM_CLIENT_STREAMING):
                     phase = String(format: klL("Playing from %@ — %.0f fps, %.0f ms pose→photon", "Jugando desde %@ — %.0f fps, %.0f ms pose→fotón"),
                                    target.name, s.video_fps, s.p2p_ms)
@@ -644,14 +694,17 @@ struct StreamPlayView: View {
                     phase = klL("\(target.name) refused the connection: ", "\(target.name) rechazó la conexión: ") + KLStreamSession.refusal(s.ack_status)
                     failed = true
                 case Int32(KL_STREAM_CLIENT_ENDED):
-                    phase = klL("\(target.name) ended the session.", "\(target.name) cerró la sesión.")
+                    phase = KLStreamSession.endedTitle(s, mac: target.name) + klL(". Back to the library…", ". Volviendo a la biblioteca…")
                     if endedAt == nil { endedAt = Date() }
                 default: break
                 }
             }
-            // The Mac ended it: give the card a moment, then go home.
-            if let e = endedAt, Date().timeIntervalSince(e) > 1.5 {
-                await exit("host BYE")
+            // The game on the Mac ended (BYE) or the Mac went silent: give the
+            // card a moment over the black, then go home to the library — no
+            // guest ran in this process, so unlike a local game (one per
+            // session, then the app closes) there is nothing to tear down.
+            if let e = endedAt, Date().timeIntervalSince(e) > 2.0 {
+                await exit("host ended the session")
                 return
             }
             try? await Task.sleep(for: .milliseconds(500))
@@ -663,6 +716,7 @@ struct StreamPlayView: View {
         exiting = true
         KLStreamSession.shared.stop(reason: why)
         await dismissImmersiveSpace()
+        KLStreamSession.shared.clearEndFade()
         // The session's summary (fps of the stream as shown here, its length) is final now;
         // the next stream in this process is a session of its own.
         KLSessionStats.shared.endStream(reason: "stream ended")
