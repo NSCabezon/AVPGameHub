@@ -45,10 +45,11 @@ public enum Catalog {
                      stream: StreamHostInfo(
                         availability: .ready, bootTarget: "alyx",
                         contentEnv: "KL_GLIBC_CONTENT", contentMarkers: ["hlvr", "core"],
-                        // visionos/stage_alyx.sh's default (KL_ALYX_CONTENT, else ../../game/content/game
-                        // from Klepton), then the public repo's gitignored local/ layout.
+                        // This repo's layout first (Klepton is the klepton/ submodule, content in the
+                        // gitignored local/), then visionos/stage_alyx.sh's default (KL_ALYX_CONTENT, else
+                        // ../../game/content/game from Klepton) and the old vendor/Klepton local/ layout.
                         contentOverrideEnv: "KL_ALYX_CONTENT",
-                        contentCandidates: ["../../game/content/game", "../../local/game/content/game"],
+                        contentCandidates: ["../local/game/content/game", "../../game/content/game", "../../local/game/content/game"],
                         environment: ["KL_GLIBC_ARGS": "-vr -vulkan -console +vr_fidelity_level_auto 0 +vr_fidelity_level 1"])),
         CatalogEntry(target: "superhot", display: "SUPERHOT VR", steamApp: 617830,
                      steamAPKDepot: 617833, steamAPKName: "shvr.apk", metaRecipe: "superhot"),

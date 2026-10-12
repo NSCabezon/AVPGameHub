@@ -75,6 +75,10 @@ final class StreamCommandTests: XCTestCase {
         let other = root.appendingPathComponent("other")
         for m in ["hlvr", "core"] { try fm.createDirectory(at: other.appendingPathComponent(m), withIntermediateDirectories: true) }
         XCTAssertEqual(StreamLaunch.detectContent(klepton: k, info: alyx, env: ["KL_ALYX_CONTENT": other.path]), other.path)
+        // Submodule layout: <repo>/klepton next to <repo>/local/game/content/game
+        let sub = root.appendingPathComponent("repo/klepton")
+        try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+        XCTAssertEqual(StreamLaunch.detectContent(klepton: sub, info: alyx, env: [:]), pub.standardizedFileURL.path)
         // A directory without the markers is not content.
         XCTAssertFalse(StreamLaunch.contentPresent(root.path, info: alyx))
     }
