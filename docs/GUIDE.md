@@ -48,7 +48,7 @@ Everything the [README](../README.md) leaves out.
 
    | `local/…` | What goes there |
    |---|---|
-   | `config.env` | `KLEPTON_BUNDLE_ID` (required), `KLEPTON_TEAM`, `KLEPTON_DEVICE`, optional `KLEPTON_HUB_GAMES` / `KLEPTON_LOW_LATENCY` (see the example file) |
+   | `config.env` | `KLEPTON_BUNDLE_ID` (required), `KLEPTON_TEAM`, `KLEPTON_DEVICE`, optional `KLEPTON_HUB_GAMES` / `KLEPTON_LOW_LATENCY` / `KLEPTON_ICLOUD` (see the example file) |
    | `game/` | Half-Life: Alyx's Linux build: `game/bin/` (Steam depot 546564) and `game/steamrt4-arm64/` (the Steam Linux Runtime 4, arm64) |
    | `superhot/`, `metro/` | Steam downloads the SUPERHOT VR and Metro Awakening APKs come from (can be deleted once copied) |
    | `tools/` | Meta's `ovr-platform-util` (below) |
@@ -215,7 +215,8 @@ The command-line tools are in the packages: `swift run steamdepot …` in `packa
   Mac; the message names what is missing and the command that gets it.
 - **Signing fails on an entitlement** ("doesn't include the … entitlement"): the memory
   capabilities need a paid team; `KLEPTON_ENTITLEMENTS=0` builds without any. The
-  `low-latency-streaming` entitlement is off unless you set `KLEPTON_LOW_LATENCY=1`.
+  `low-latency-streaming` entitlement is off unless you set `KLEPTON_LOW_LATENCY=1`, and the iCloud
+  entitlements (save backups of the Meta games) unless you set `KLEPTON_ICLOUD=1`.
 - **"the Apple team has no device registered yet"**: the first build registers the headset; keep
   it awake, unlocked and on the same Wi-Fi, then run the build again.
 

@@ -20,10 +20,13 @@ let package = Package(
     dependencies: [
         .package(path: "../../packages/SteamDepot"),
         .package(path: "../../packages/MetaStore"),
+        .package(path: "../../packages/SaveKit"),
     ],
     targets: [
         // No UI and no store code: process running, devicectl commands, log and session parsing.
-        .target(name: "HubCore", swiftSettings: [.swiftLanguageMode(.v5)]),
+        // Re-exports SaveKit (save table and backup format, shared with the headset hub).
+        .target(name: "HubCore", dependencies: [.product(name: "SaveKit", package: "SaveKit")],
+                swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(
             name: "AVPGameHub",
             dependencies: [
