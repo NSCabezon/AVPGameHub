@@ -34,7 +34,7 @@ Everything the [README](../README.md) leaves out.
 3. **Clone and configure.**
 
    ```bash
-   git clone https://github.com/NSCabezon/AVPGameHub.git && cd AVPGameHub
+   git clone --recurse-submodules https://github.com/NSCabezon/AVPGameHub.git && cd AVPGameHub
    cp local/config.env.example local/config.env
    ```
 

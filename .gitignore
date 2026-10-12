@@ -43,3 +43,6 @@ klepton/vendor-fossilize/
 .DS_Store
 .idea/
 .vscode/
+
+# Private notes, plans and history bundles (never committed)
+private/

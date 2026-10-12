@@ -30,7 +30,7 @@ account (recommended), a Vision Pro in Developer Mode paired with that Mac, PS V
 controllers and the games on your own accounts.
 
 ```bash
-git clone https://github.com/NSCabezon/AVPGameHub.git && cd AVPGameHub
+git clone --recurse-submodules https://github.com/NSCabezon/AVPGameHub.git && cd AVPGameHub
 cp local/config.env.example local/config.env   # set KLEPTON_BUNDLE_ID to your own id
 cd apps/macos && scripts/make-app.sh && open "build/AVP Game Hub.app"
 ```
