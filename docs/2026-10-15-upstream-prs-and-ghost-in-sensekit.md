@@ -49,7 +49,8 @@ gamepad/input-hub work from the other app; the ghost commit is rebased on top of
 Upstream `shinyquagsire23/Klepton` `main` has not moved since 2026-09-03 and we have all of it;
 our fork is ~200 commits ahead. But 18 PRs from other forks were open and unmerged. Four
 read-only triage agents compared each against our tree (no PR commit was patch-identical to
-ours). Verdicts and status:
+ours). Full triage detail per PR (what we have vs lack, conflict files, order to
+resume) is in `2026-10-15-klepton-upstream-pr-triage.md`. Verdicts and status:
 
 | PR | Author | Verdict | Status |
 |---|---|---|---|
