@@ -143,7 +143,7 @@ Conflicts: `kl_x18.c` 4 hunks/283 lines (both sides add cases to the same `if` c
 mechanical), `tools/klepton_ld.c` 5/169 (only if SPLIT taken), Makefile 2/18, `kl_app.c` 1/16
 (heartbeat line). Any change here retranslates every library (mkguest keys on klepton-ld mtime).
 
-### PR 11 — libc/pthread (14 commits) — MERGE IN PROGRESS at session end
+### PR 11 — libc/pthread (14 commits) — MERGED (`0ee8685`, see the session notes for the resolutions)
 
 Fault handler reads `KL_FAULT_PEEK/WAIT` at install (`f798253`; ours called `kl_env_*` inside the
 handler at `kl_fault.c:381,515` — Batman crash-with-no-report); mutex map tombstones/`MTX_CLAIM`/
@@ -366,7 +366,7 @@ permission delivery, keyboard, meta aliases). Alyx nothing.
 
 ## Suggested resume order
 
-PR 11 (finish/verify) → PR 12 parts (Batman audio; needs a Batman headset run) → PR 20 parts in
+PR 12 parts (Batman audio; needs a Batman headset run) → PR 20 parts in
 the order above → PR 5 (C side + SenseKit battery hook) → PR 10 commits 1–3 last (each with full
 `make check` + retranslate + headset smoke). Then the PR 13 leftovers (eye desc cap, DROP_NO_EYE)
 and PR 14's poke rows to `use=0`. PR 9 only after a Batman foveation evaluation with a guard

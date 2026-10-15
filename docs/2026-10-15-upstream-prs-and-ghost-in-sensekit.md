@@ -64,7 +64,7 @@ resume) is in `2026-10-15-klepton-upstream-pr-triage.md`. Verdicts and status:
 | 15 OVRPlugin: touch bits; product name follows headset type | fayep | only the product-name commit (our touch bits are a superset) | **merged** (1 of 2) |
 | 7 Run Ancient Dungeon (JNI, bHaptics, user proof) | johnrtipton | only `XR_META_performance_metrics` and the `connect()` errno fix | **merged** (hand-port) |
 | 13 OVRPlugin/XR layer: Beat Saber stale frame, one pose per frame, protocol | rebelancap | three pieces: eye-FBO-map release (the Beat Saber menu fix), OpenXR constants (62/63/45) + larger pools, compositor env knobs read once | **merged** (rest skipped: double pose-pinning risk against our RECORD_INDEXED path) |
-| 11 libc/pthread: sync-object identity, side tables, signal/errno/path, fault handler | rebelancap | take whole as a merge; QoS default off; drop our `KL_PTHREAD_WIDE_HASH` knob; sems at 65536 with generations | **in progress** |
+| 11 libc/pthread: sync-object identity, side tables, signal/errno/path, fault handler | rebelancap | take whole as a merge; QoS default off; drop our `KL_PTHREAD_WIDE_HASH` knob; sems at 65536 with generations | **merged** (`0ee8685`) |
 | 12 Audio: float/PCM_EX, OpenSL+AAudio arbitration, AAudio seams, haptics | rebelancap | formats/arbitration/AAudio commits (Batman: Wwise/Oboe needs `AAudio_getMMapPolicy`, `PCM_EX`, `GetConfiguration`); haptics backoff by hand into `SenseHaptics.swift` | pending |
 | 20 Unreal/JNI: JNI_OnLoad chain, EOS/FMOD, GameActivity surface, bHaptics, NDK | rebelancap | by commit: object model, framework families (**HashMap ctor bug we share**), `AudioManager.getDevices`, NDK door (+ drop `libandroid.so` from core-shim list), UE5/GameActivity surface for Metro; skip multiview/haptics/FMOD rewrite | pending |
 | 5 battery levels (headset + controllers) | SBudarin | C side whole; Swift side re-done through SenseKit (we no longer poll `GCController` in the app) | pending |
@@ -77,6 +77,16 @@ Each merged PR is its own commit (cherry-picks keep upstream authorship, `-x`); 
 which commit they come from. Verification per batch: `make -s check` (host tests), `make
 swiftcheck`, `make xros` (device + simulator runtime link).
 
+PR 11 merge notes (klepton `0ee8685`): their rwlock map + our "held lock gets a fresh host
+object at init" rule grafted in; mutex hash unconditional with tombstones (`KL_PTHREAD_WIDE_HASH`
+gone); semaphores with generation handles at 65536 slots (`KL_SEM_SLOT_BITS 16`), PR 19's
+high-water log kept; their `sem_post` getenv (async-signal-unsafe) replaced by our primed trace;
+`KL_GUEST_QOS` default OFF (upstream defaults `initiated`); tgkill/tkill real liveness (our
+`KL_TKILL_PROBE` gone); duplicate E() rows removed (`link`, `timezone`, `mkdtemp`, `fesetround`,
+`wcscasecmp`, `pthread_attr_setinheritsched` ours; `sched_setscheduler/getscheduler`,
+`clock_nanosleep`, `__poll_chk` theirs); `t_sem.c` loops resized for the bigger table. `make
+check` adds t_sem/t_mtx/t_tgkill.
+
 ## 4. What to verify on the headset (next build)
 
 - Beat Saber: main-menu picture no longer stale after the eye swapchain is recreated (PR 13);
@@ -88,6 +98,10 @@ swiftcheck`, `make xros` (device + simulator runtime link).
 - Ghost controllers look and behave as before (SenseKit renderer).
 - Batman audio, once PR 12/20 parts are in.
 - Metro: boot unchanged (OpenXR constants/pools).
+- Any game after PR 11: threads/locks are the most invasive change of the day (mutex map,
+  rwlocks, semaphores, signals). A boot + a few minutes of play on Alyx (streamed or local), one
+  Unity title and Metro is the smoke test; a hang or deadlock points at the merge, revert with
+  `git revert -m 1 0ee8685`.
 
 ## 5. Rolling back
 
