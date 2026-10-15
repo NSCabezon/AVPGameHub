@@ -126,3 +126,29 @@ The adapter then becomes roughly: `state(.left/.right, at:)` → map `SenseButto
 - Hand-tracking fallback: **not** in phase 1; stays in Klepton.
 - Minimum OS: **visionOS 26+** (decided 2026-10-13). The package drops the `#available(visionOS 26.0, *)` guards.
 
+
+## 2026-10-15: ghost controllers
+
+The scope grows by one thing that was Klepton-only in `KleptonHUD.swift`: the **ghost controllers**,
+the in-code PSVR2 Sense model drawn at a resting controller's real pose so it can be found in full VR,
+hidden the moment it is picked up. Moved into SenseKit so another visionOS app can reuse it (the Mac
+streaming client, a guest of its own), in three pieces:
+
+- `SenseGhost.swift`: `SenseGhostConfiguration` (every threshold, window, the fade, the model's fit
+  and the colours), `SenseGhostHandState` (the per-hand in-hand state machine with its hysteresis,
+  a straight port of `KLGhostHand`), `SenseGhosts` (both hands plus the frame clock) and
+  `SenseGhostHands.palm(_:)` (the palm centre off a `HandAnchor`).
+- `SenseGhostMesh.swift`: the pure geometry (capsule grip, tracking ring, top disc; interleaved
+  position/normal/uv and a UInt16 triangle list, winding checked against the normals), API-neutral
+  so a RealityKit app can build a `MeshResource` from it.
+- `SenseGhostRenderer.swift`: the Metal drawing (`import Metal`), body then rim with front-face
+  culling, premultiplied blend, reverse-Z depth with the `depthOverScene` swap, vertex amplification,
+  into an encoder the app already has open.
+
+Behaviour on the headset is unchanged: same thresholds, hysteresis, fade, colours, rim trick, depth
+handling and `[ghost]` log lines. The package still reads **no environment variables**: Klepton's HUD
+maps `KL_GHOST_INPUT_S`, `KL_GHOST_SHOW_S`, `KL_GHOST_PLATFORM_HELD`, `KL_GHOST_ROT` and
+`KL_GHOST_POS` into a `SenseGhostConfiguration`, keeps `KL_GHOST_CTRL` (live on/off) and
+`depthOverScene` for itself, and routes `SenseGhosts.logger` to `NSLog("[ghost] …")`. Metal joins the
+package's framework list (GameController + ARKit + CoreHaptics + Metal); the state machine and the
+mesh are covered by unit tests in `SenseGhostTests.swift`.
