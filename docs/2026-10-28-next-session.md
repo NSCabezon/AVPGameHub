@@ -49,7 +49,11 @@ Klepton ported. Owned by the account (`metastore owns 2637179839719680` → owne
    range, and a real stretch of the campaign. Watch for:
    - stutter from pipeline compiles. Fix: add RE4 to the precompile path (Fossilize) the way
      Metro was;
-   - fps at `render_scale` 0.6. Raise it with the in-app slider if there is headroom;
+   - fps at `render_scale` 0.6. Raise it with the in-app slider if there is headroom. The Mac
+     viewer (M1 Max) swung between 40 and 107 fps, but it runs with debug knobs
+     (`KL_TRACE_FS=1`, about 175k log lines; `KL_GLFB_ERRSCAN=1`) and full-res eyes. Its seam
+     stats show a ~4 ms `vkQueueWaitIdle` at frame end and a ~4 ms GPU-idle gap per frame,
+     which are worth checking on the headset if RE4 is short of 72/90;
    - hand/weapon tracking and grip/trigger mapping on the Sense controllers;
    - cutscene audio: upstream notes MP4 cutscene audio is not decoded ("says so once");
    - movie panels are black in this build (expected, fixed in `35ff6a7`).
