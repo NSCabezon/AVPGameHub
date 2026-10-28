@@ -67,6 +67,29 @@ Totals: 12 + 60 + 82 + 47 + 2 + 37 = 238. Two commits are split across categorie
 | TestFlight, flat Frameworks, MoltenVK-FDM, staging | `1c9e18b` `e8bddde` `6bd23f8` `acf1dc4` `e9d3a3f` `f08e3b8` `f1b4f1f` `80eb3de` `a153503` `7736da8` | OURS-ONLY | `6bd23f8`'s sim path came from avp-play and is not upstream |
 | Other people's PRs | rebelancap `f798253`..`0a38a70` (PR 11), `9ca3e38`..`1814c3a`, `5d16234` (PR 21/13); fayep `c420c63`..`c051e55`, `4a0eae5`..`15553d7`, `7ac1eeb`, `701930a` (PR 14-19); johnrtipton `0c1de07` (PR 8, merged); `94804a3`, `faa61e4` (hand-taken hunks of PR 7/13); `0ee8685` (PR 11 merge); `a37704e` (avp-play) | NOT-OURS | |
 
+## Decided grouping (2026-10-28): 9 PRs, in this order
+
+Upstream already takes themed PRs (open PR 20 "Unreal/JNI: …", PR 21 "gl: …"), so the 17
+candidates below ship as 9. Each one keeps one theme so a reviewer can read it in one sitting, and
+a problem in one does not block the others. Don't merge any further than this.
+
+| Order | PR | Contains | Theme / notes |
+|---|---|---|---|
+| 1 | **A. RE4 end to end** | P1 + P2 + `ovrp_Shutdown2` fix | `make check TARGET=re4` passes fully, Bink movies show. Fix `klovrp_Shutdown2` to take the pointer RE4's `libOVRPlugin.so` passes (the `ovrpabi` gate fails today on origin/main too). BUILDING.md note rewritten without the metro row. |
+| 2 | **C. Graphics** | P5 + P14 | Re-check hl2/portal (were in the by-name multiview list). |
+| 3 | **B. Tooling** | P3 + P12 + P8 | Confirm the simulator ANGLE/lld flag is still needed on Xcode 27. |
+| 4 | **E. Mac viewer + locale** | P11 + P9 | |
+| 5 | **D. OpenXR/OVRPlugin** | P4 + P6 + P10 | Overlaps open PRs 13 (P6) and 15 (P10): comment on those PRs first, don't compete. |
+| 6 | **F. x18 CASP veneer** | P7 | Alone (translator). Adapted from Glovebox (MIT): credit in commit + PR. |
+| 7 | **G. Fossilize** | P15 | Alone (~1.3k). Glovebox-derived: credit. |
+| 8 | **H. New targets** | P13 + P17 | ieytd, ktane, Metro. Metro needs D, C and part of I. Scrub private-path comments and hub keys. |
+| — | **I. Half-Life: Alyx (glibc guest)** | P16 | Open an issue asking upstream whether they want a glibc/PC guest kind and the Steamworks stand-in before splitting ~12k lines. |
+
+Mechanics for each: branch from `origin/main`, cherry-pick `-x` (or re-apply by hand), strip
+`Claude-Session:` trailers and any hub/personal text, `make -s check` (+ the target's own check),
+show the diff to the owner, push to the `fork` remote, open the PR to shinyquagsire23/Klepton.
+Nothing is pushed or opened without the owner seeing the diff first.
+
 ## Proposed upstream PRs
 
 Ordered from smallest and safest to largest. "Clean" means `git cherry-pick` onto `origin/main`
