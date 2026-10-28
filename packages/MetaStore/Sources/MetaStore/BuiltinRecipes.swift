@@ -8,6 +8,10 @@
 // ieytd: not from avp-play — app/binary ids, size and md5 from Meta's live release channel
 // (2026-10-12); sha256 of that binary as downloaded by `metastore fetch ieytd --apk-only`.
 // ktane: likewise from Meta's live release channel (2026-10-12); sha256 of that binary as fetched.
+// re4: from avp-play recipes/store-2637179839719680.json (MIT); size and sha256 of the APK and both
+// OBBs re-checked 2026-10-28 against the owner's Quest copy. UE4 builds its own OBB path, so the
+// OBBs go to android-files/Android/obb/<package> (like Metro), not android-files/obb. Left out, as
+// avp-play does: the unstripped engine .so (crash reports, 2.7 GB) and three Windows .bat files.
 enum BuiltinRecipes {
     static let json: [String] = [
         #"""
@@ -2501,6 +2505,48 @@ enum BuiltinRecipes {
   }
  ],
  "origin": "Meta release channel live 799274117075141 (binary 25827385563548991, md5 8974109996cbeb9da014407982f2d7d6), 2026-10-12"
+}
+"""#,
+        #"""
+{
+ "schema": 1,
+ "id": "re4",
+ "title": "Resident Evil 4",
+ "package": "com.Armature.VR4",
+ "versionName": "2.3",
+ "versionCode": 203,
+ "appId": "2637179839719680",
+ "target": "re4",
+ "files": [
+  {
+   "name": "VR4-Android-Shipping-arm64.apk",
+   "role": "apk",
+   "id": "5793258947445071",
+   "size": 56831952,
+   "sha256": "9738e3f7637efce22010a792878246f0138e4e914acb29c4371f3a5c1329d1e1",
+   "required": true,
+   "dest": "meta"
+  },
+  {
+   "name": "main.203.com.Armature.VR4.obb",
+   "role": "main-obb",
+   "id": "5793247094112923",
+   "size": 4278854071,
+   "sha256": "424c182036e5aa09f858471fabde1221bbb943d2a27820ced99083e19ebc99dd",
+   "required": true,
+   "dest": "android-files/Android/obb/com.Armature.VR4"
+  },
+  {
+   "name": "patch.203.com.Armature.VR4.obb",
+   "role": "patch-obb",
+   "id": "5793253277445638",
+   "size": 4233911336,
+   "sha256": "9dfc82ce570c4ddc8f09bae391ecb569ecee050c3ce165dab7a33795dfa5bbcf",
+   "required": true,
+   "dest": "android-files/Android/obb/com.Armature.VR4"
+  }
+ ],
+ "origin": "avp-play recipes/store-2637179839719680.json (MIT, github.com/myMartek/avp-play); sizes and sha256 re-checked 2026-10-28 against the owner's Quest copy"
 }
 """#,
     ]

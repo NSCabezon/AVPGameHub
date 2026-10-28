@@ -67,6 +67,8 @@ public enum Catalog {
                      steamAPKDepot: nil, steamAPKName: nil, metaRecipe: "ieytd"),
         CatalogEntry(target: "ktane", display: "Keep Talking and Nobody Explodes", steamApp: nil,
                      steamAPKDepot: nil, steamAPKName: nil, metaRecipe: "ktane"),
+        CatalogEntry(target: "re4", display: "Resident Evil 4", steamApp: nil,
+                     steamAPKDepot: nil, steamAPKName: nil, metaRecipe: "re4"),
     ]
 
     public static func entry(_ target: String) -> CatalogEntry? { entries.first { $0.target == target } }

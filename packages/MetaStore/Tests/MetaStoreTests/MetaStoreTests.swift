@@ -203,6 +203,26 @@ final class RecipeTests: XCTestCase {
         XCTAssertEqual(FetchPlan.wantedFiles(recipe: r, selection: FetchSelection()).map(\.name), ["KeepTalkingandNobodyExplodes.apk"])
     }
 
+    func testRE4Recipe() throws {
+        let r = try XCTUnwrap(Recipes.recipe(id: "re4"))
+        XCTAssertNoThrow(try r.validate())
+        XCTAssertEqual(r.target, "re4")
+        XCTAssertEqual(r.appId, "2637179839719680")
+        XCTAssertEqual(r.package, "com.Armature.VR4")
+        XCTAssertEqual(r.versionCode, 203)
+        XCTAssertNil(r.addons)
+        XCTAssertEqual(r.files.map(\.role), ["apk", "main-obb", "patch-obb"])
+        XCTAssertTrue(r.files.allSatisfy(\.required))
+        XCTAssertEqual(r.apk?.relativePath, "meta/VR4-Android-Shipping-arm64.apk")
+        // UE4 builds <files>/Android/obb/<package> itself (like Metro), not android-files/obb.
+        XCTAssertEqual(r.files.dropFirst().map(\.relativePath), [
+            "android-files/Android/obb/com.Armature.VR4/main.203.com.Armature.VR4.obb",
+            "android-files/Android/obb/com.Armature.VR4/patch.203.com.Armature.VR4.obb",
+        ])
+        XCTAssertEqual(r.files.reduce(0) { $0 + ($1.size ?? 0) }, 56_831_952 + 4_278_854_071 + 4_233_911_336)
+        XCTAssertEqual(FetchPlan.wantedFiles(recipe: r, selection: FetchSelection()).count, 3)
+    }
+
     func testLanguagePackValidation() throws {
         var r = try XCTUnwrap(Recipes.recipe(id: "batman"))
         let i = try XCTUnwrap(r.files.firstIndex { $0.locale == "en-US" })

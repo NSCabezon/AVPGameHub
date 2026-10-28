@@ -19,6 +19,7 @@ streaming.
 | Metro Awakening | `Steam` | Runs on the Mac; being tested on the headset |
 | I Expect You To Die | `Meta` | Runs on the Mac; being tested on the headset |
 | Keep Talking and Nobody Explodes | `Meta` | Runs on the Mac; being tested on the headset |
+| Resident Evil 4 | `Meta` | Runs on the Mac; not yet tested on the headset |
 
 Half-Life: Alyx on a Vision Pro **M2**: ~45 fps (median frame 22.1 ms, 1 % low 29.5 fps), 4× MSAA
 with foveated rendering, 0 shader stalls, ~20 s loads.

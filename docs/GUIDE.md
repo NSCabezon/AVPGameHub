@@ -144,11 +144,12 @@ cp local/superhot/shvr.apk klepton/superhot.apk
 cd klepton && apktool d -f -o superhot superhot.apk && cd ..
 ```
 
-### Meta games: Beat Saber, Batman: Arkham Shadow, I Expect You To Die, Keep Talking and Nobody Explodes
+### Meta games: Beat Saber, Batman: Arkham Shadow, I Expect You To Die, Keep Talking and Nobody Explodes, Resident Evil 4
 
 One APK each, fetched from your Meta account (`--apk-only`: no OBBs, no data). Recipes and sizes
 (APK / decoded): `beatsaber` (55 MB / 165 MB), `batman` (76 MB / 250 MB), `ieytd` (533 MB /
-1.2 GB), `ktane` (150 MB / 220 MB). For each game `<g>` you own:
+1.2 GB), `ktane` (150 MB / 220 MB), `re4` (57 MB / 200 MB; its 7.9 GB of OBBs download on the
+headset). For each game `<g>` you own:
 
 ```bash
 (cd packages/MetaStore && swift run metastore fetch <g> --apk-only --out ../../klepton/<g>.apk)

@@ -85,6 +85,14 @@ public enum SaveTable {
         ]),
         unity("ieytd"),
         unity("ktane"),
+        // UE4 4.25: the engine keeps UE4Game/<Project>/<Project>/Saved under android-files
+        // (project "VR4"; System.sav and Saved/Config seen on the Mac host). Only SaveGames and Config.
+        GameSaveLocation(target: "re4", engine: "Unreal Engine 4", roots: [
+            SaveRoot(path: androidFiles("re4") + "/UE4Game", include: ["VR4/VR4/Saved/SaveGames",
+                                                                      "VR4/VR4/Saved/Config"],
+                     what: "Saved/SaveGames (partidas) y Saved/Config (ajustes .ini)"),
+            SaveRoot(path: androidFiles("re4") + "/cloudstorage", what: "Meta CloudStorage2"),
+        ]),
     ]
 
     public static func location(for target: String) -> GameSaveLocation? { locations.first { $0.target == target } }

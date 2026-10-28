@@ -67,6 +67,18 @@ final class SaveTableTests: XCTestCase {
         XCTAssertEqual(kept, ["\(u)/Config/Android/GameUserSettings.ini", "\(u)/SaveGames/Slot0.sav"])
     }
 
+    func testRE4SaveGamesAndConfigOnly() {
+        let u = "Documents/games/re4/android-files/UE4Game/VR4/VR4/Saved"
+        let kept = SaveTable.saveFiles("re4", in: [
+            RemoteFile(path: "\(u)/SaveGames/System.sav", size: 3000),
+            RemoteFile(path: "\(u)/Config/Android/GameUserSettings.ini", size: 300),
+            RemoteFile(path: "\(u)/Logs/VR4.log", size: 300),
+            RemoteFile(path: "Documents/games/re4/android-files/UE4Game/VR4/Engine/Saved/Config/Android/Engine.ini", size: 300),
+            RemoteFile(path: "Documents/games/re4/android-files/Android/obb/com.Armature.VR4/main.203.com.Armature.VR4.obb", size: 4_278_854_071),
+        ]).map(\.path)
+        XCTAssertEqual(kept, ["\(u)/Config/Android/GameUserSettings.ini", "\(u)/SaveGames/System.sav"])
+    }
+
     func testHugeFileAndUnsafePathsAreRejected() {
         let f = "Documents/games/ktane/android-files/files"
         XCTAssertFalse(SaveTable.isRestorable("ktane", path: "\(f)/huge.dat", size: SaveTable.maxFileBytes + 1))
